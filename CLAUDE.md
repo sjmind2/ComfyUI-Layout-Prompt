@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-ComfyUI custom node `LayoutPromptBuilder` ("Layout Prompt Builder", category `model/conditioning/moss_image`). It turns a summary, an aspect-ratio/megapixel choice, and an editable set of 0-1000 boxes into the MOSS-Image layout prompt plus the output width and height. The Python side is standard-library only; the editor is vanilla ES modules served from `web/` via `WEB_DIRECTORY = "./web"`.
+ComfyUI custom node `LayoutPromptBuilder` ("Layout Prompt Builder", category `model/conditioning/moss_image`). It turns a summary, an aspect-ratio/megapixel choice, and an editable set of 0-1000 boxes into the MOSS-Image layout prompt plus the output width and height. `layout_core.py` is standard-library-only; `nodes.py` uses ComfyUI's V3 `comfy_api.latest` API; the editor is vanilla ES modules served from `web/` via `WEB_DIRECTORY = "./web"`.
 
 ## Commands
 

@@ -2,13 +2,13 @@
 
 A custom ComfyUI node for building MOSS-Image layout prompts interactively. It combines the output-size selector, a box editor, and the layout-prompt serializer into one node: set the summary and output shape, draw boxes over a white canvas or a reference image, and get `width`, `height`, and the layout prompt string.
 
-For the same boxes and size, the prompt matches the built-in `CreateBoundingBoxes` + `MOSSImageLayoutPrompt` chain byte for byte. The node can replace that chain (and `ResolutionSelector`) in a MOSS workflow.
+For the same boxes fed to `MOSSImageLayoutPrompt`, the prompt matches byte for byte. `CreateBoundingBoxes` re-quantizes boxes through its pixel canvas first (and can add palette data), so exact equality with the full chain requires boxes that survive that round-trip. The node can replace that chain (and `ResolutionSelector`) in a MOSS workflow.
 
 ## Installation
 
 1. Copy this folder into ComfyUI's `custom_nodes` directory as `ComfyUI-Layout-Prompt`.
    - On this machine it is installed at `E:/ComfyUI2/custom_nodes/ComfyUI-Layout-Prompt` and loaded by the ComfyUI instance whose base directory is `E:/ComfyUI2` (the ComfyUI code checkout is `C:/Users/sjmin/ComfyUI-Installs/ComfyUI/ComfyUI`).
-2. No dependencies or build step are required: the Python side is standard library only, and the frontend is plain ES modules.
+2. No extra dependencies or build step are required: `layout_core.py` is standard-library-only, `nodes.py` uses ComfyUI's V3 `comfy_api.latest` API, and the frontend is plain ES modules.
 3. Restart the ComfyUI server and hard-refresh the browser (`Ctrl+F5` or `Shift`+Reload) after installing or after changing any Python or frontend file. Browser module caching can otherwise keep an old editor.
 
 The node appears under **model/conditioning/moss_image** as **Layout Prompt Builder**.
@@ -38,7 +38,7 @@ Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) only fire when th
 | Add a box | `+ add` in the list header. Adds a centered 20% box (0-1000 bbox `[400,400,600,600]`), label `character`, and focuses its caption field. |
 | Edit a box | In its row: the label dropdown (`character`, `object`, `text`), the caption input, and a `text` input that appears only for `text` labels. Edits commit on blur or after a short typing pause. |
 | Duplicate | `Ctrl+D` (canvas/row focus), or the row's duplicate button. The copy is offset by 30 units and selected. |
-| Reorder | The row's up/down buttons. List order is JSON item order and canvas paint order (later items draw in front). |
+| Reorder | The row's up/down buttons. List order is JSON item order and canvas paint order: later items draw in front, except the selected box, which is always painted last. |
 | Delete | `Delete` or `Backspace` (canvas/row focus), or the row's delete button. |
 | Nudge | Arrow keys move the selected box 1 unit; `Shift`+arrows move it 10 units (the editor's 0-1000 coordinate space). |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` (the `Cmd` keys also work on macOS). |
@@ -47,7 +47,7 @@ Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) only fire when th
 | Move bg | Toolbar toggle. While active, left-dragging pans the reference instead of editing boxes. |
 | White / Reference | Toolbar toggle. View-only: it keeps the loaded reference and is not an undo step. |
 | Pick file | Toolbar button. Uploads a local image and makes it the reference. |
-| Last | Toolbar button. Uses the last executed output image as the reference; disabled until an output is known. Its title is "Use last output as the reference". |
+| Last | Toolbar button. Uses the last executed output image as the reference; disabled until an output is known. Enabled title: "Use last output as the reference"; disabled title: "No output image yet — run the workflow to generate one". |
 | Fill / Fit | Toolbar toggle. `Fill` covers the canvas and crops the overflow; `Fit` contains the whole image and letterboxes it. Both reset zoom to 100% and recenter. |
 
 ## Reference image
@@ -58,7 +58,7 @@ The reference sits under the boxes and is dimmed to about 55% brightness so the 
 
 - **Pick file** uploads the image to ComfyUI's `input` folder under a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name (`type=input`, `overwrite=true`). Only the descriptor `{filename, type, subfolder}` is stored, so the reference survives a workflow save and a ComfyUI restart as long as the file remains. A workflow moved to another machine may not find the file.
 - **Last** uses the newest image from the most recent `executed` event (the last image when an event reports several). New executions update the button but never replace the displayed reference on their own; click `Last` to apply it. After a reload, the descriptor stored with the workflow is offered until a newer execution arrives. Last-output images often live in ComfyUI's temp folder and can be cleaned up later.
-- A small `file` or `last` badge on the toolbar names the source of the currently displayed reference.
+- A small `file` or `last` badge on the toolbar names the stored reference source (the badge remains visible while `White` is selected).
 - If an upload or a `Last` load fails, the previous reference is kept and the hint line shows an error.
 
 ### Transform
@@ -129,10 +129,10 @@ With no boxes, `prompt` is the summary exactly as typed (it is not stripped); an
 
 - There is no graph `IMAGE` input. The reference sources are a picked file and the last executed output.
 - No `palette`, `meta`, `canvas` (multi-panel), or `tags` fields; layouts are single-panel.
-- MOSS-Image layout prompting is experimental upstream. The JSON is kept byte-for-byte compatible with the installed `MOSSImageLayoutPrompt` (a parity test covers this), but the upstream format may change.
+- MOSS-Image layout prompting is experimental upstream. The JSON is kept byte-for-byte compatible with the installed `MOSSImageLayoutPrompt` for the same input boxes; parity is checked against that node directly, and against the full `CreateBoundingBoxes` chain only for fixtures that survive its re-quantization. The upstream format may change.
 - The reference is guidance only; it does not affect the layout JSON or the generated image by itself.
 - Undo/redo of a pan or zoom restores the transform by reloading the reference image; a brief loading state or white canvas is possible.
-- The last-output button's visible label is `Last`; its title is "Use last output as the reference".
+- The last-output button's visible label is `Last`; its title is "Use last output as the reference" when enabled and "No output image yet — run the workflow to generate one" while disabled.
 - There is no automatic captioning or bbox detection, and no touch/mobile support.
 
 ## Development
