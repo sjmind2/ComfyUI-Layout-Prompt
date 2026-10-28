@@ -469,6 +469,13 @@ class TestSchema(unittest.TestCase):
         out = cls.execute("  hello  ", "1:1 (Square)", 1.0, "")
         self.assertEqual(out.args[2], "  hello  ")
 
+    def test_invalid_boxes_logs_warning(self):
+        cls = pkg.NODE_CLASS_MAPPINGS["LayoutPromptBuilder"]
+        with self.assertLogs(level="WARNING") as cm:
+            out = cls.execute("hello", "1:1 (Square)", 1.0, "not json")
+        self.assertEqual(out.args[2], "hello")
+        self.assertTrue(any("boxes_json" in message for message in cm.output))
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -484,12 +491,12 @@ Expected: `FileNotFoundError` / no `__init__.py`.
 
 - [ ] **Step 3: Implement `nodes.py` and `__init__.py`**
 
-`execute` calls `compute_size`, `parse_boxes` (defaulting to `""`), and `build_layout_prompt`. Use relative imports (`from .layout_core import ...`) and the schema exactly as above.
+`execute` calls `compute_size`, `parse_boxes` (defaulting to `""`), and `build_layout_prompt`. If `boxes_json.strip()` is non-empty and `parse_boxes` returns no boxes, log a warning that mentions `boxes_json` (`logging.getLogger(__name__).warning(...)`) and still output the summary. Use relative imports (`from .layout_core import ...`) and the schema exactly as above.
 
 - [ ] **Step 4: Run the schema test to verify it passes**
 
 Run the same command.
-Expected: 3 tests pass.
+Expected: 4 tests pass.
 
 - [ ] **Step 5: Load the node in ComfyUI**
 
