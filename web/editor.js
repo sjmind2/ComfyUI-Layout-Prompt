@@ -482,16 +482,21 @@ export class LayoutEditor {
     // A load that was still in flight belongs to the previous document.
     this.lastRequest += 1;
 
+    this.cancelPersistBackground();
+    // Size the canvas from the restored widgets first. setViewport clamps the
+    // pan against the current viewport, so the stored background must be
+    // loaded afterwards; restoring before reflowing would zero the saved pan
+    // while the new image is still decoding.
+    this.refreshCanvasSize();
+
     // Background state saved with the workflow. This is a load, not an edit:
     // it must never push an undo entry. A missing/unloadable file keeps the
     // stored descriptor and lets the canvas fall back to white.
-    this.cancelPersistBackground();
     const storedBackground = this.node?.properties?.layoutPromptBg;
     if (storedBackground && this.background) {
       this.background.loadStored(storedBackground);
     }
 
-    this.refreshCanvasSize();
     this.renderState();
     this.updateToolbar();
     this.scheduleRender();

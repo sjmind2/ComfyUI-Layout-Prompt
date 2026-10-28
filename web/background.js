@@ -457,8 +457,14 @@ export class Background {
   /** @private Clamp pan so the image keeps the canvas covered or contained. */
   _clampPan() {
     if (!this.hasImage()) {
-      this.panX = 0;
-      this.panY = 0;
+      // While a reference is still decoding there is no scale to clamp
+      // against. Keep the restored pan so the completed image can use it;
+      // a reflow during an upload/Last/restore load must not wipe it. Once
+      // the load fails (loading = false) the pan is reset below.
+      if (!this.loading) {
+        this.panX = 0;
+        this.panY = 0;
+      }
       return;
     }
 
