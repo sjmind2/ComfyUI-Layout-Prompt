@@ -988,6 +988,12 @@ export class LayoutEditor {
     event.preventDefault();
     event.stopPropagation();
 
+    // A box or pan gesture owns the pointer until it commits. `this.state`
+    // may be a transient preview mid-drag, so zooming now would record an
+    // uncommitted box position in history. Ignore the notch (still consumed);
+    // a cancelled drag must leave no undoable trace.
+    if (this.boxDrag || this.panDrag) return;
+
     if (event.deltaY === 0 || !this.background?.hasImage()) return;
 
     const before = this.background.toJSON();
@@ -1244,11 +1250,18 @@ export class LayoutEditor {
     return this.canvasHovered;
   }
 
-  /** True when keyboard focus is somewhere inside the editor panel. */
+  /**
+   * True when the canvas or a row control has keyboard focus. Toolbar buttons
+   * and the list header (+ add) are not editing surfaces; focusing them must
+   * not let Delete/arrows/Ctrl+Z edit the layout.
+   */
   ownsKeyboardFocus() {
     const active = globalThis.document?.activeElement;
-    if (!active || !this.root) return false;
-    return this.root.contains(active);
+    if (!active) return false;
+    if (active === this.canvas) return true;
+    if (!this.listHost?.contains(active)) return false;
+    if (typeof active.closest !== "function") return false;
+    return active.closest(".lp-row") !== null;
   }
 
   /** Stop a handled shortcut before the graph's own key handlers see it. */
@@ -1551,7 +1564,14 @@ export class LayoutEditor {
   restoreSnapshot(snapshot) {
     this.applyState(snapshot?.layout ?? this.state, { rebuild: true });
     if (this.background && snapshot?.background) {
+      // White/Reference is a view-only toggle, not a history edit: keep the
+      // mode the user is currently looking at while the file/Fit/zoom/pan are
+      // restored from the snapshot.
+      const mode = this.background.mode;
       this.background.loadStored(snapshot.background);
+      if (mode === "white" || mode === "reference") {
+        this.background.setMode(mode);
+      }
     }
     this.updateHover(null);
     this.updateToolbar();
