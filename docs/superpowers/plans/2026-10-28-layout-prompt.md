@@ -657,15 +657,15 @@ git commit -m "feat: add pointer box editing"
 
 **Interfaces:**
 - Canvas has `tabindex="0"`; keydown handler ignores events from `input`, `select`, and `textarea`.
-- History: `createHistory(50)`, snapshots pushed on pointer-up and committed field changes; `Ctrl+Z`/`Ctrl+Shift+Z` outside text fields.
+- History: `createHistory(50)`, snapshots pushed on pointer-up and committed field changes; entries are `{layout, background}` composites where `background` is `Background.toJSON()`; `Ctrl+Z`/`Ctrl+Shift+Z` outside text fields.
 
 - [ ] **Step 1: Implement keyboard and history**
 
-Arrows nudge the selected box 1 unit, Shift+arrows 10; Delete/Backspace deletes; Ctrl+D duplicates; Esc deselects; Ctrl+Z/Ctrl+Shift+Z undo/redo. Space+drag and middle-drag pan without entering draw mode. Push snapshots only on commits; update the hidden widget after undo/redo.
+Arrows nudge the selected box 1 unit, Shift+arrows 10; Delete/Backspace deletes; Ctrl+D duplicates; Esc deselects; Ctrl+Z/Ctrl+Shift+Z undo/redo. Space+drag and middle-drag pan without entering draw mode. Push `{layout, background}` snapshots only on commits; include Fit/Fill/zoom/pan commits but not selection-only changes or mode/source toggles. Undo/redo restore both the layout (hidden widget, list, height) and the reference transform via `Background.loadStored`. Coalesce held-arrow nudges into one history entry.
 
 - [ ] **Step 2: Verify manually**
 
-Manual: nudge, delete, duplicate, deselect, undo/redo across add/move/resize/label/caption/text/reorder; Ctrl+Z inside a caption edits text, not the layout; keys only fire with canvas focus; Delete while typing in a caption does not delete a box; the wheel never zooms the graph.
+Manual: nudge, delete, duplicate, deselect, undo/redo across add/move/resize/label/caption/text/reorder; undo/redo a reference pan/zoom restores the transform; Ctrl+Z inside a caption edits text, not the layout; keys only fire with canvas focus; Delete while typing in a caption does not delete a box; the wheel never zooms the graph.
 
 - [ ] **Step 3: Commit (only if the user authorized git)**
 
