@@ -14,10 +14,10 @@ Run from the repository root (this checkout is also the installed custom node):
 # Python core (system Python 3.12 with pytest): 19 tests
 python -m pytest tests/ -v
 
-# Pure frontend modules (Node 22 node:test): 40 tests
+# Pure frontend modules (Node 22 node:test): 47 tests
 npm test
 
-# Equivalent direct invocation (same 40 tests)
+# Equivalent direct invocation (same 47 tests)
 node --test "tests/js/*.test.js"
 
 # Node schema and execute behavior (ComfyUI venv, no pytest): 4 tests
@@ -37,10 +37,11 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - `layout_core.py` - stdlib-only core. `ASPECT_RATIOS` (eight MOSS display names), `compute_size()` (aspect ratio + megapixels, multiple fixed at 16), `parse_boxes()` (defensive parse of the hidden JSON into normalized 0-1000 boxes), `convert_bbox()` (copied from `MOSSImageLayoutPrompt.execute`), and `build_layout_prompt()` (exact compact MOSS JSON). Must stay importable without ComfyUI.
 - `nodes.py` - V3 `io.ComfyNode`. Schema inputs `summary`, `aspect_ratio`, `megapixels`, `boxes_json` (socketless); outputs `width` INT, `height` INT, `prompt` STRING, in that order. `execute()` warns when non-empty `boxes_json` yields no usable boxes and still emits the summary.
 - `__init__.py` - `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY = "./web"`.
-- `web/layout_prompt.js` - extension shell. Registers `Moss.LayoutPromptBuilder`, hides the `boxes_json` widget, adds the DOM widget `layout_editor` (type `LayoutEditor`), chains `onNodeCreated` / `onConfigure` / `onResize` / `onRemoved`, and owns the global `executed` listener plus the `liveEditors` registry.
+- `web/layout_prompt.js` - extension shell. Registers `Moss.LayoutPromptBuilder`, hides the `boxes_json` widget, adds the DOM widget `layout_editor` (type `LayoutEditor`), chains `onNodeCreated` / `onConfigure` / `onResize` / `onRemoved`, and owns the global `executed` listener, the one-per-page `/history` seed, and the `liveEditors` registry.
 - `web/editor.js` - `LayoutEditor`: owns layout state, history, selection, toolbar, pointer/keyboard editing, file upload, `Last`, background persistence, and node-height management.
 - `web/editor_height.js` - DOM-free height/width math for the editor panel: `computeEditorHeight()` (list rows capped at five), `DOM_WIDGET_MARGIN`, and `CANVAS_HORIZONTAL_GUTTER`.
 - `web/node_size.js` - DOM-free `isNodeSize()` guard for litegraph node sizes and `computeSize()` results (they may be Float64Array-backed proxies, not `Array`s).
+- `web/history_image.js` - DOM-free `lastHistoryImage()`: newest image descriptor in a raw `/history` response (walks entries newest-first and skips non-image outputs).
 - `web/canvas.js` - `CanvasView`: device-pixel-ratio backing store, paint order (selected last), box/hover/selection drawing, and the clipped, dimmed reference layer.
 - `web/background.js` - `Background`: mode, source, file/last descriptors, Fill/Fit, zoom, pan, pan clamping, image loading via `api.apiURL("/view?...")`, and the `toJSON()` / `loadStored()` snapshot used for persistence and undo.
 - `web/geometry.js` - DOM-free `normalizeBbox`, `bboxToRect`, `rectToBbox`, and `hitTest` (8 handles, topmost box wins).
@@ -48,7 +49,7 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - `web/size.js` - zero-dependency mirror of `compute_size`, including Python's round-half-to-even behavior (`pythonRound`), used by the editor for canvas sizing and the live size hint.
 - `web/list.js` - single-column box list renderer, label list/colors, selection helpers, and row-local key handling.
 - `web/styles.js` - `injectStyles()`, scoped under `.layout-prompt-editor`.
-- Tests: `tests/test_layout_core.py` (pytest, 19); `tests/js/*.test.js` (node:test, 40); `tests/node_schema_check.py` (unittest, 4, ComfyUI venv); `tests/parity_moss_check.py` (unittest, 5, real ComfyUI chain).
+- Tests: `tests/test_layout_core.py` (pytest, 19); `tests/js/*.test.js` (node:test, 47); `tests/node_schema_check.py` (unittest, 4, ComfyUI venv); `tests/parity_moss_check.py` (unittest, 5, real ComfyUI chain).
 
 ## Invariants
 
@@ -66,7 +67,7 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 ## Gotchas
 
 - **Hidden `boxes_json` widget.** The schema still declares it, and the extension only sets `widget.hidden = true`; do not remove it or its value stops serializing with the workflow. The DOM widget uses `serialize: false` and the editor writes `serializeState(state)` into `boxes_json` on committed edits: pointer-up gestures and discrete mutations immediately, field typing after the 150 ms debounce (blur flushes it). A queue started inside that debounce window can see the previous text. If the widget is missing, the extension warns and editor state will not persist.
-- **Global `executed` listener + `liveEditors`.** `web/layout_prompt.js` registers the listener once and keeps live editors in a `Set`. Each executed event calls `editor.setLastOutput(ref)` with the last entry of `detail.output.images`; it never switches the displayed reference. Editors unregister on `destroy()` / `onRemoved`, so removed nodes are ignored.
+- **Global `executed` listener + `liveEditors`.** `web/layout_prompt.js` registers the listener once and keeps live editors in a `Set`. Each executed event calls `editor.setLastOutput(ref)` with the last entry of `detail.output.images`; it never switches the displayed reference. On node creation the extension also fetches `/history?max_items=20` once per page and seeds `editor.setLastOutput()` with the newest image, so the `Use last` button works after a reload or for images produced before the node existed. The seed is skipped if a live execution already populated `lastOutput` or the editor was removed, and it never changes the reference. Editors unregister on `destroy()` / `onRemoved`, so removed nodes are ignored.
 - **Upload and view URLs.** Picking a file posts `FormData` (`image` with a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name, `type=input`, `overwrite=true`) to `api.fetchApi("/upload/image")`; images load through `api.apiURL("/view?filename=...&type=...&subfolder=...&t=...")` with a cache-busting `t`. Only `{filename, type, subfolder}` descriptors are persisted, never image data. A pick commits only after the image decodes; an upload or decode failure restores the previous snapshot and pushes no history entry. Both upload and `Last` share the `lastRequest` token so a superseded load cannot commit.
 - **Wheel consumption.** The canvas wheel listener is `passive: false` and always calls `preventDefault()` + `stopPropagation()`, so the graph never zooms. The notch is ignored during an active box/pan drag, and a wheel burst shares one undo entry (500 ms window).
 - **Pointer mapping.** Convert client coordinates with `canvas.getBoundingClientRect()` and the display-size/rect-size scale (`canvasScale()`), never raw client pixels; this keeps boxes under the cursor at any graph zoom. Pointer move/up/cancel for drags are registered on `window` so gestures survive leaving the canvas.

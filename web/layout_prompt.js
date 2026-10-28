@@ -8,6 +8,7 @@ import { api } from "../../scripts/api.js";
 
 import { LayoutEditor } from "./editor.js";
 import { DOM_WIDGET_MARGIN } from "./editor_height.js";
+import { lastHistoryImage } from "./history_image.js";
 import { isNodeSize } from "./node_size.js";
 import { injectStyles } from "./styles.js";
 
@@ -49,12 +50,32 @@ api.addEventListener("executed", ({ detail } = {}) => {
   const ref = executedImage(detail);
   if (!ref) return;
 
-  // Every live editor stores the newest image for its "Last" button. The
+  // Every live editor stores the newest image for its "Use last" button. The
   // displayed reference is never switched automatically.
   for (const editor of liveEditors) {
     editor.setLastOutput?.(ref);
   }
 });
+
+// One history lookup per page. On node creation the newest generated image is
+// offered to "Use last", so the button still works after a reload or for
+// images produced before the node existed. Live executed events win.
+let lastHistoryImagePromise = null;
+
+function fetchLastHistoryImage() {
+  if (!lastHistoryImagePromise) {
+    lastHistoryImagePromise = (async () => {
+      try {
+        const response = await api.fetchApi("/history?max_items=20");
+        if (!response?.ok) return null;
+        return lastHistoryImage(await response.json());
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return lastHistoryImagePromise;
+}
 
 /**
  * Wrap an existing node lifecycle handler without dropping it.
@@ -119,6 +140,14 @@ app.registerExtension({
       editor.onDestroy = () => liveEditors.delete(editor);
       liveEditors.add(editor);
       editor.mount(container);
+
+      // Seed "Use last" from the newest generated image. A live execution
+      // that already populated lastOutput wins; the seed never switches the
+      // displayed reference on its own.
+      void fetchLastHistoryImage().then((ref) => {
+        if (!ref || node.layoutEditor !== editor || editor.lastOutput) return;
+        editor.setLastOutput(ref);
+      });
 
       const computed = node.computeSize();
       const initialHeight = isNodeSize(node.size) ? node.size[1] : 0;

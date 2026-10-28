@@ -681,8 +681,8 @@ export class LayoutEditor {
     );
 
     const lastButton = this.createToolButton(
-      "Last",
-      "No output image yet — run the workflow to generate one",
+      "Use last",
+      "No generated image available yet — run the workflow",
       () => {
         void this.useLastOutput();
       },
@@ -798,8 +798,8 @@ export class LayoutEditor {
       this.lastButton.disabled = !lastRef;
       this.lastButton.style.opacity = lastRef ? "" : "0.4";
       const title = lastRef
-        ? "Use last output as the reference"
-        : "No output image yet — run the workflow to generate one";
+        ? "Use the last generated image as the reference"
+        : "No generated image available yet — run the workflow";
       if (this.lastButton.title !== title) {
         this.lastButton.title = title;
         this.lastButton.setAttribute("aria-label", title);
@@ -845,7 +845,7 @@ export class LayoutEditor {
     } else if (background?.loading) {
       message = "Loading reference…";
     } else if (background?.mode === "reference" && !background.hasImage()) {
-      message = "No reference yet — use Pick file or Last.";
+      message = "No reference yet — pick a file or use the last output.";
     }
 
     if (this.hintElement.textContent !== message) {

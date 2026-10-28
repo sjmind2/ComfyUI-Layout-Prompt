@@ -47,7 +47,7 @@ Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) fire while keyboa
 | Move bg | Toolbar toggle. While active, left-dragging pans the reference instead of editing boxes. |
 | White / Reference | Toolbar toggle. View-only: it keeps the loaded reference and is not an undo step. |
 | Pick file | Toolbar button. Uploads a local image and makes it the reference. |
-| Last | Toolbar button. Uses the last executed output image as the reference; disabled until an output is known. Enabled title: "Use last output as the reference"; disabled title: "No output image yet — run the workflow to generate one". |
+| Use last | Toolbar button. Uses the last generated image as the reference; disabled until one is known. On load it recovers the newest image from ComfyUI's history, so it works after a reload or for images produced before the node existed. Enabled title: "Use the last generated image as the reference"; disabled title: "No generated image available yet — run the workflow". |
 | Fill / Fit | Toolbar toggle. `Fill` covers the canvas and crops the overflow; `Fit` contains the whole image and letterboxes it. Both reset zoom to 100% and recenter. |
 
 ## Reference image
@@ -57,9 +57,9 @@ The reference sits under the boxes and is dimmed to about 55% brightness so the 
 ### Sources
 
 - **Pick file** uploads the image to ComfyUI's `input` folder under a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name (`type=input`, `overwrite=true`). Only the descriptor `{filename, type, subfolder}` is stored, so the reference survives a workflow save and a ComfyUI restart as long as the file remains. A workflow moved to another machine may not find the file.
-- **Last** uses the newest image from the most recent `executed` event (the last image when an event reports several). New executions update the button but never replace the displayed reference on their own; click `Last` to apply it. After a reload, the descriptor stored with the workflow is offered until a newer execution arrives. Last-output images often live in ComfyUI's temp folder and can be cleaned up later.
+- **Use last** uses the newest image known to the editor: initially the newest generated image in ComfyUI's history (`/history?max_items=20`, fetched once per page load), then each new `executed` event (the last image when an event reports several). History is global to the ComfyUI instance. New executions update the button but never replace the displayed reference on their own; click `Use last` to apply it. After a reload the button re-enables from history even if the workflow stored no last descriptor. Last-output images often live in ComfyUI's temp folder and can be cleaned up later.
 - A small `file` or `last` badge on the toolbar names the stored reference source (the badge remains visible while `White` is selected).
-- If an upload, its image decode, or a `Last` load fails, the previous reference is kept and the hint line shows an error. A successful upload or `Last` load, or a White/Reference switch, clears that message; it survives the internal reference reload and canvas reflow that follow the failure.
+- If an upload, its image decode, or a `Use last` load fails, the previous reference is kept and the hint line shows an error. A successful upload or `Use last` load, or a White/Reference switch, clears that message; it survives the internal reference reload and canvas reflow that follow the failure.
 
 ### Transform
 
@@ -90,7 +90,7 @@ The reference sits under the boxes and is dimmed to about 55% brightness so the 
 
 - The background state is stored in `node.properties.layoutPromptBg` as `{mode, source, file, last, fit, zoom, panX, panY}` and saved with the workflow. Only reference descriptors are stored; no image bytes or base64 data are written into the workflow.
 - On reload the editor restores the boxes and the reference transform. If a stored reference file is missing, the canvas falls back to white with a "reference unavailable" hint (shown in Reference mode), and the stored descriptor and pan are kept so the file can be restored later.
-- `White`/`Reference` is view-only. Picking a file or using `Last` is an undoable source edit.
+- `White`/`Reference` is view-only. Picking a file or using `Use last` is an undoable source edit.
 
 ## Outputs
 
@@ -127,12 +127,12 @@ With no boxes, `prompt` is the summary exactly as typed (it is not stripped); an
 
 ## Limitations (v1)
 
-- There is no graph `IMAGE` input. The reference sources are a picked file and the last executed output.
+- There is no graph `IMAGE` input. The reference sources are a picked file and the last generated output (live execution or ComfyUI history).
 - No `palette`, `meta`, `canvas` (multi-panel), or `tags` fields; layouts are single-panel.
 - MOSS-Image layout prompting is experimental upstream. The JSON is kept byte-for-byte compatible with the installed `MOSSImageLayoutPrompt` for the same input boxes; parity is checked against that node directly, and against the full `CreateBoundingBoxes` chain only for fixtures that survive its re-quantization. The upstream format may change.
 - The reference is guidance only; it does not affect the layout JSON or the generated image by itself.
 - Undo/redo of a pan or zoom restores the transform by reloading the reference image; a brief loading state or white canvas is possible.
-- The last-output button's visible label is `Last`; its title is "Use last output as the reference" when enabled and "No output image yet — run the workflow to generate one" while disabled.
+- The history lookup is global to the ComfyUI instance and limited to the newest 20 entries. If ComfyUI's history is empty or cleared, `Use last` falls back to the last-output descriptor stored in the workflow (if any).
 - There is no automatic captioning or bbox detection, and no touch/mobile support.
 
 ## Development
