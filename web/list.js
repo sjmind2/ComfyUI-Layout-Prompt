@@ -1,8 +1,9 @@
 // Single-column box list for the Layout Prompt Builder editor.
 //
 // Pure DOM renderer: the caller owns the layout state and applies every
-// change through the handler callbacks. Rendering rebuilds the rows from the
-// given state, so a handler that mutates state should re-render afterwards.
+// change through the handler callbacks. Structural changes (add, delete,
+// reorder, label) re-render the rows; caption/text edits are reported as
+// input events so the editor can commit them quietly without a rebuild.
 
 export const LABELS = Object.freeze(["character", "object", "text"]);
 
@@ -94,7 +95,10 @@ function createRow(box, index, total, selected, handlers) {
   caption.placeholder = "caption";
   caption.autocomplete = "off";
   caption.setAttribute("aria-label", `Box ${rowNumber} caption`);
-  caption.addEventListener("change", () => {
+  caption.addEventListener("input", () => {
+    handlers.onInput?.(box.id, { caption: caption.value });
+  });
+  caption.addEventListener("blur", () => {
     handlers.onUpdate?.(box.id, { caption: caption.value });
   });
 
@@ -108,7 +112,10 @@ function createRow(box, index, total, selected, handlers) {
     text.placeholder = "text";
     text.autocomplete = "off";
     text.setAttribute("aria-label", `Box ${rowNumber} text`);
-    text.addEventListener("change", () => {
+    text.addEventListener("input", () => {
+      handlers.onInput?.(box.id, { text: text.value });
+    });
+    text.addEventListener("blur", () => {
       handlers.onUpdate?.(box.id, { text: text.value });
     });
     row.append(text);
@@ -155,8 +162,9 @@ function createRow(box, index, total, selected, handlers) {
  * Render the box list into a container.
  * @param {HTMLElement} container
  * @param {{boxes: object[], selectedId: string | null}} state
- * @param {{onSelect?: Function, onUpdate?: Function, onDelete?: Function,
- *          onDuplicate?: Function, onMove?: Function, onAdd?: Function}} handlers
+ * @param {{onSelect?: Function, onInput?: Function, onUpdate?: Function,
+ *          onDelete?: Function, onDuplicate?: Function, onMove?: Function,
+ *          onAdd?: Function}} handlers
  * @returns {void}
  */
 export function renderBoxList(container, state, handlers = {}) {
@@ -197,6 +205,22 @@ export function renderBoxList(container, state, handlers = {}) {
   }
 
   container.replaceChildren(header, list);
+}
+
+/**
+ * Update the selected-row styling without rebuilding the list.
+ * @param {HTMLElement} container
+ * @param {string | null} selectedId
+ * @returns {void}
+ */
+export function updateRowSelection(container, selectedId) {
+  for (const row of container.querySelectorAll(".lp-row")) {
+    if (row.dataset.id === selectedId) {
+      row.classList.add("lp-row-selected");
+    } else {
+      row.classList.remove("lp-row-selected");
+    }
+  }
 }
 
 /**

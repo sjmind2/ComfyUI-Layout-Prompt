@@ -9,6 +9,7 @@ import {
   LABELS,
   renderBoxList,
   restoreFieldFocus,
+  updateRowSelection,
 } from "./list.js";
 import {
   addBox,
@@ -29,6 +30,9 @@ const LIST_ROW_HEIGHT = 28;
 const LIST_ROW_GAP = 2;
 const MAX_VISIBLE_ROWS = 5;
 const MIN_VISIBLE_ROWS = 1;
+
+// Typing commits after this pause; blur flushes immediately.
+const FIELD_DEBOUNCE_MS = 150;
 
 // A 20% box centered in the 0-1000 yxyx coordinate space.
 const DEFAULT_BOX_BBOX = [400, 400, 600, 600];
@@ -56,9 +60,13 @@ export class LayoutEditor {
     this.listHost = null;
     this.abortController = null;
 
+    this.pendingEdit = null;
+    this.editTimer = null;
+
     this.handlers = {
       onAdd: () => this.addNewBox(),
       onSelect: (id) => this.selectBox(id),
+      onInput: (id, patch) => this.queueFieldEdit(id, patch),
       onUpdate: (id, patch) => this.applyUpdate(id, patch),
       onDelete: (id) => this.applyDelete(id),
       onDuplicate: (id) => this.applyDuplicate(id),
@@ -115,6 +123,7 @@ export class LayoutEditor {
 
   /** Re-read state after ComfyUI restores saved widget values. */
   syncFromWidget() {
+    this.cancelPendingEdit();
     this.state = deserializeState(this.hiddenWidget?.value ?? "");
     this.renderState();
     this.requestHeight();
@@ -122,6 +131,7 @@ export class LayoutEditor {
 
   /** Release the panel DOM and every listener registered by the shell. */
   destroy() {
+    this.cancelPendingEdit();
     this.abortController?.abort();
     this.abortController = null;
 
@@ -149,19 +159,70 @@ export class LayoutEditor {
   }
 
   /**
-   * Persist and display a new state after a mutation.
+   * Apply a new state and persist it.
    * @param {object} nextState
-   * @param {{focusCaption?: boolean}} [options]
+   * @param {{rebuild?: boolean, focusCaption?: boolean}} [options]
    */
-  commit(nextState, { focusCaption = false } = {}) {
+  applyState(nextState, { rebuild = false, focusCaption = false } = {}) {
     this.state = nextState;
     if (this.hiddenWidget) {
       this.hiddenWidget.value = serializeState(nextState);
     }
 
-    this.renderState();
-    if (focusCaption) this.focusCaption();
+    if (rebuild) {
+      this.renderState();
+      if (focusCaption) this.focusCaption();
+    } else {
+      // Quiet edits leave the row inputs in place; only selection styling
+      // needs to follow the state.
+      this.updateSelectionClasses();
+    }
+
     this.requestHeight();
+  }
+
+  /**
+   * Buffer a caption/text edit and commit it after a short pause.
+   * @param {string} id
+   * @param {object} patch
+   */
+  queueFieldEdit(id, patch) {
+    if (!patch || !this.hasBox(id)) return;
+
+    if (this.editTimer !== null) clearTimeout(this.editTimer);
+    if (this.pendingEdit?.id === id) {
+      this.pendingEdit.patch = { ...this.pendingEdit.patch, ...patch };
+    } else {
+      this.flushPendingEdit();
+      this.pendingEdit = { id, patch: { ...patch } };
+    }
+
+    this.editTimer = setTimeout(() => {
+      this.editTimer = null;
+      this.flushPendingEdit();
+    }, FIELD_DEBOUNCE_MS);
+  }
+
+  /** Commit a buffered field edit without rebuilding the list. */
+  flushPendingEdit() {
+    if (this.editTimer !== null) {
+      clearTimeout(this.editTimer);
+      this.editTimer = null;
+    }
+
+    const pending = this.pendingEdit;
+    this.pendingEdit = null;
+    if (!pending) return;
+
+    this.applyQuietUpdate(pending.id, pending.patch);
+  }
+
+  cancelPendingEdit() {
+    if (this.editTimer !== null) {
+      clearTimeout(this.editTimer);
+      this.editTimer = null;
+    }
+    this.pendingEdit = null;
   }
 
   /** Ask the node to grow if the panel no longer fits in its body. */
@@ -181,6 +242,11 @@ export class LayoutEditor {
     node.setDirtyCanvas?.(true, true);
   }
 
+  updateSelectionClasses() {
+    if (!this.listHost) return;
+    updateRowSelection(this.listHost, this.state.selectedId);
+  }
+
   focusCaption() {
     const id = this.state.selectedId;
     if (!id || !this.listHost) return;
@@ -189,6 +255,19 @@ export class LayoutEditor {
       (candidate) => candidate.dataset.id === id,
     );
     row?.querySelector(".lp-caption")?.focus();
+  }
+
+  hasBox(id) {
+    return this.state.boxes.some((box) => box.id === id);
+  }
+
+  /** Keep only fields this editor knows how to store. */
+  filterPatch(patch) {
+    const next = {};
+    if (LABELS.includes(patch?.label)) next.label = patch.label;
+    if (typeof patch?.caption === "string") next.caption = patch.caption;
+    if (typeof patch?.text === "string") next.text = patch.text;
+    return next;
   }
 
   /** A string id unique within the current state. */
@@ -200,42 +279,69 @@ export class LayoutEditor {
   }
 
   addNewBox() {
+    this.flushPendingEdit();
     const box = createBox(this.newBoxId(), DEFAULT_BOX_BBOX, {
       label: DEFAULT_BOX_LABEL,
     });
-    this.commit(addBox(this.state, box), { focusCaption: true });
+    this.applyState(addBox(this.state, box), {
+      rebuild: true,
+      focusCaption: true,
+    });
   }
 
   selectBox(id) {
+    if (!this.hasBox(id)) return;
+    this.flushPendingEdit();
     if (this.state.selectedId === id) return;
-    if (!this.state.boxes.some((box) => box.id === id)) return;
-    this.commit({ ...this.state, selectedId: id });
+    this.applyState({ ...this.state, selectedId: id });
   }
 
   applyUpdate(id, patch) {
-    if (!patch || !this.state.boxes.some((box) => box.id === id)) return;
+    if (!this.hasBox(id)) return;
 
-    const next = {};
-    if (LABELS.includes(patch.label)) next.label = patch.label;
-    if (typeof patch.caption === "string") next.caption = patch.caption;
-    if (typeof patch.text === "string") next.text = patch.text;
+    const next = this.filterPatch(patch);
     if (Object.keys(next).length === 0) return;
 
-    this.commit({ ...updateBox(this.state, id, next), selectedId: id });
+    const structural = next.label !== undefined;
+    // Label changes rebuild the row; preserve buffered caption/text edits
+    // first. Blur commits are quiet and never disturb the pointer target.
+    this.flushPendingEdit();
+
+    this.applyState(
+      { ...updateBox(this.state, id, next), selectedId: id },
+      { rebuild: structural },
+    );
+  }
+
+  applyQuietUpdate(id, patch) {
+    if (!this.hasBox(id)) return;
+
+    const next = this.filterPatch(patch);
+    if (Object.keys(next).length === 0) return;
+
+    this.applyState(
+      { ...updateBox(this.state, id, next), selectedId: id },
+      { rebuild: next.label !== undefined },
+    );
   }
 
   applyDelete(id) {
-    if (!this.state.boxes.some((box) => box.id === id)) return;
-    this.commit(deleteBox(this.state, id));
+    if (!this.hasBox(id)) return;
+    this.flushPendingEdit();
+    this.applyState(deleteBox(this.state, id), { rebuild: true });
   }
 
   applyDuplicate(id) {
-    if (!this.state.boxes.some((box) => box.id === id)) return;
-    this.commit(duplicateBox(this.state, id, this.newBoxId()));
+    if (!this.hasBox(id)) return;
+    this.flushPendingEdit();
+    this.applyState(duplicateBox(this.state, id, this.newBoxId()), {
+      rebuild: true,
+    });
   }
 
   applyMove(id, delta) {
-    if (!this.state.boxes.some((box) => box.id === id)) return;
-    this.commit(moveBox(this.state, id, delta));
+    if (!this.hasBox(id)) return;
+    this.flushPendingEdit();
+    this.applyState(moveBox(this.state, id, delta), { rebuild: true });
   }
 }
