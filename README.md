@@ -1,0 +1,140 @@
+# Layout Prompt Builder for ComfyUI
+
+A custom ComfyUI node for building MOSS-Image layout prompts interactively. It combines the output-size selector, a box editor, and the layout-prompt serializer into one node: set the summary and output shape, draw boxes over a white canvas or a reference image, and get `width`, `height`, and the layout prompt string.
+
+For the same boxes and size, the prompt matches the built-in `CreateBoundingBoxes` + `MOSSImageLayoutPrompt` chain byte for byte. The node can replace that chain (and `ResolutionSelector`) in a MOSS workflow.
+
+## Installation
+
+1. Copy this folder into ComfyUI's `custom_nodes` directory as `ComfyUI-Layout-Prompt`.
+   - On this machine it is installed at `E:/ComfyUI2/custom_nodes/ComfyUI-Layout-Prompt` and loaded by the ComfyUI instance whose base directory is `E:/ComfyUI2` (the ComfyUI code checkout is `C:/Users/sjmin/ComfyUI-Installs/ComfyUI/ComfyUI`).
+2. No dependencies or build step are required: the Python side is standard library only, and the frontend is plain ES modules.
+3. Restart the ComfyUI server and hard-refresh the browser (`Ctrl+F5` or `Shift`+Reload) after installing or after changing any Python or frontend file. Browser module caching can otherwise keep an old editor.
+
+The node appears under **model/conditioning/moss_image** as **Layout Prompt Builder**.
+
+## Using the node
+
+1. Set `summary` (the global scene/style caption), `aspect_ratio`, and `megapixels`.
+   - Aspect ratios: `1:1 (Square)`, `2:3 (Portrait Photo)`, `3:2 (Photo)`, `3:4 (Portrait Standard)`, `4:3 (Standard)`, `9:16 (Portrait Widescreen)`, `16:9 (Widescreen)`, `21:9 (Ultrawide)`.
+   - `megapixels` accepts 0.1-16.0 in steps of 0.1 (default 1.0; MOSS typically uses 1-2 MP).
+   - Output sides are rounded to multiples of 16. For example, 1:1 at 1.0 MP is 1024 x 1024 and 16:9 at 1.0 MP is 1360 x 768.
+2. Draw boxes on the canvas and edit their rows in the box list. New boxes default to the `character` label with an empty caption.
+3. Queue the prompt. Connect `width`, `height`, and `prompt` wherever the MOSS workflow expects the output size and layout string.
+
+The canvas always represents the exact output rectangle, scaled to fit the node. The hint line below the toolbar shows the current output size (`1024 x 1024`, for example) and the transform shortcuts.
+
+### Controls
+
+Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) only fire when the canvas or a box row has keyboard focus; clicking the canvas gives it focus. Inside caption/text inputs, keys behave as normal text editing (including the browser's native `Ctrl+Z` undo) and never edit the layout. The editor prevents the keys it handles from reaching the graph.
+
+| Action | Control |
+|---|---|
+| Draw a box | Left-drag on empty canvas. A drag shorter than 3 display px counts as a click (deselect). The box is clamped to the canvas, appended to the list, and selected. |
+| Move a box | Left-drag inside the box. |
+| Resize a box | Drag one of the 8 handles (four corners and four edge midpoints) on the selected box. The minimum size is 3 display px. |
+| Select | Click a box, or click a list row. Canvas and list share the selection; selecting on the canvas scrolls the row into view. |
+| Deselect | `Esc` (with canvas/row focus), or click empty canvas. |
+| Add a box | `+ add` in the list header. Adds a centered 20% box (0-1000 bbox `[400,400,600,600]`), label `character`, and focuses its caption field. |
+| Edit a box | In its row: the label dropdown (`character`, `object`, `text`), the caption input, and a `text` input that appears only for `text` labels. Edits commit on blur or after a short typing pause. |
+| Duplicate | `Ctrl+D` (canvas/row focus), or the row's duplicate button. The copy is offset by 30 units and selected. |
+| Reorder | The row's up/down buttons. List order is JSON item order and canvas paint order (later items draw in front). |
+| Delete | `Delete` or `Backspace` (canvas/row focus), or the row's delete button. |
+| Nudge | Arrow keys move the selected box 1 unit; `Shift`+arrows move it 10 units (the editor's 0-1000 coordinate space). |
+| Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` (the `Cmd` keys also work on macOS). |
+| Zoom reference | Mouse wheel over the canvas, anchored at the pointer; the `−` and `+` buttons step 10 percentage points. The `zoom %` label shows the current value. The wheel is always consumed by the editor, so the graph never zooms. |
+| Pan reference | Toggle `Move bg` and drag, hold `Space` and left-drag, or middle-drag. |
+| Move bg | Toolbar toggle. While active, left-dragging pans the reference instead of editing boxes. |
+| White / Reference | Toolbar toggle. View-only: it keeps the loaded reference and is not an undo step. |
+| Pick file | Toolbar button. Uploads a local image and makes it the reference. |
+| Last | Toolbar button. Uses the last executed output image as the reference; disabled until an output is known. Its title is "Use last output as the reference". |
+| Fill / Fit | Toolbar toggle. `Fill` covers the canvas and crops the overflow; `Fit` contains the whole image and letterboxes it. Both reset zoom to 100% and recenter. |
+
+## Reference image
+
+The reference sits under the boxes and is dimmed to about 55% brightness so the layout stays readable. It is guidance only: it is never part of the prompt, the node outputs, or the graph.
+
+### Sources
+
+- **Pick file** uploads the image to ComfyUI's `input` folder under a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name (`type=input`, `overwrite=true`). Only the descriptor `{filename, type, subfolder}` is stored, so the reference survives a workflow save and a ComfyUI restart as long as the file remains. A workflow moved to another machine may not find the file.
+- **Last** uses the newest image from the most recent `executed` event (the last image when an event reports several). New executions update the button but never replace the displayed reference on their own; click `Last` to apply it. After a reload, the descriptor stored with the workflow is offered until a newer execution arrives. Last-output images often live in ComfyUI's temp folder and can be cleaned up later.
+- A small `file` or `last` badge on the toolbar names the source of the currently displayed reference.
+- If an upload or a `Last` load fails, the previous reference is kept and the hint line shows an error.
+
+### Transform
+
+- `Fill` (the default) scales the reference to cover the canvas and crops the overflow. `Fit` contains the whole image and letterboxes it.
+- Zoom ranges from 50% to 800% of the current Fill/Fit base scale; 100% means the preset scale. Wheel zoom is anchored at the pointer, and `−`/`+` step 10 percentage points.
+- Pan with `Move bg` + drag, `Space` + left-drag, or middle-drag. Pan is clamped: a reference larger than the canvas always keeps it covered, and a smaller reference stays fully inside.
+- Changing `aspect_ratio` or `megapixels` re-fits the canvas. Boxes keep their normalized positions and never move, while the reference keeps its zoom and the image point that was at the canvas center.
+- Reference Fit/Fill/zoom/pan and source changes share the same undo history as box edits. Undoing or redoing a pan/zoom reloads the reference image from the server, so it can briefly show the loading state.
+
+## Persistence
+
+- Box data (id, label, caption, text, bbox) and list order are stored in the hidden `boxes_json` widget and saved with the workflow. Selection is not stored.
+
+```json
+{
+  "version": 1,
+  "boxes": [
+    {
+      "id": "box_example",
+      "label": "character",
+      "caption": "hatsune miku",
+      "text": "",
+      "bbox": [100, 200, 400, 600]
+    }
+  ]
+}
+```
+
+- The background state is stored in `node.properties.layoutPromptBg` as `{mode, source, file, last, fit, zoom, panX, panY}` and saved with the workflow. Only reference descriptors are stored; no image bytes or base64 data are written into the workflow.
+- On reload the editor restores the boxes and the reference transform. If a stored reference file is missing, the canvas falls back to white with a "reference unavailable" hint, and the stored reference is kept so the file can be restored later.
+- `White`/`Reference` is view-only. Picking a file or using `Last` is an undoable source edit.
+
+## Outputs
+
+| Output | Type | Meaning |
+|---|---|---|
+| `width` | INT | Output width in pixels. |
+| `height` | INT | Output height in pixels. |
+| `prompt` | STRING | The MOSS-Image layout prompt. |
+
+`width` and `height` come from the aspect ratio and megapixel target:
+
+```
+scale = sqrt(megapixels * 1024 * 1024 / (w_ratio * h_ratio))
+width  = round(w_ratio * scale / 16) * 16
+height = round(h_ratio * scale / 16) * 16
+```
+
+Both sides are always multiples of 16.
+
+### Prompt JSON
+
+With at least one box, `prompt` is compact UTF-8 JSON with this shape (the summary is stripped):
+
+```json
+{"summary":{"caption":"1girl, long hair"},"items":[{"label":"character","caption":"hatsune miku","bbox":[-410,-308,-102,103]},{"label":"text","caption":"shop sign","text":"こんにちは","bbox":[0,-410,410,308]}],"bbox_coord_space":"abs_centralized","bbox_format":"yxyx"}
+```
+
+- `items` follow list order. Each item has `label` and `caption`; only `text` items also have `text` (the literal characters).
+- Every editor bbox is an integer 0-1000 `[y0, x0, y1, x1]` (y first; y maps to output height, x to output width). In the output, `bbox` is `[y0, x0, y1, x1]` in absolute pixels with the canvas center as the origin: low edges use `floor(round(value * dimension / 1000, 9)) - dimension // 2`, high edges use `ceil(...) - dimension // 2`. For example, `[100,200,400,600]` at 1024 x 1024 becomes `[-410,-308,-102,103]`.
+- Labels are exactly `character`, `object`, and `text`. An unknown label is treated as `object`.
+- `bbox_coord_space` is `"abs_centralized"` and `bbox_format` is `"yxyx"`. There are no `palette`, `meta`, `canvas`, or `tags` keys.
+
+With no boxes, `prompt` is the summary exactly as typed (it is not stripped); an empty summary with no boxes produces an empty string. If saved box data is non-empty but unusable, the node logs a warning and emits the summary unchanged.
+
+## Limitations (v1)
+
+- There is no graph `IMAGE` input. The reference sources are a picked file and the last executed output.
+- No `palette`, `meta`, `canvas` (multi-panel), or `tags` fields; layouts are single-panel.
+- MOSS-Image layout prompting is experimental upstream. The JSON is kept byte-for-byte compatible with the installed `MOSSImageLayoutPrompt` (a parity test covers this), but the upstream format may change.
+- The reference is guidance only; it does not affect the layout JSON or the generated image by itself.
+- Undo/redo of a pan or zoom restores the transform by reloading the reference image; a brief loading state or white canvas is possible.
+- The last-output button's visible label is `Last`; its title is "Use last output as the reference".
+- There is no automatic captioning or bbox detection, and no touch/mobile support.
+
+## Development
+
+See `CLAUDE.md` for the test commands, architecture, invariants, and implementation gotchas.
