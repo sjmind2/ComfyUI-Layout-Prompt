@@ -25,7 +25,7 @@
 - No base64 reference data in the workflow; store `{filename, type, subfolder}` references only.
 - No `palette`, `meta`, `canvas`, or `tags` fields.
 - `layout_core.py`, `web/size.js`, `web/geometry.js`, `web/state.js` must not import ComfyUI.
-- Test commands: `python -m pytest tests/ -v` (system Python 3.12, pytest 7.4.3) and `node --test tests/js/` (Node 22). Node schema test uses the ComfyUI venv, see Task 5.
+- Test commands: `python -m pytest tests/ -v` (system Python 3.12, pytest 7.4.3) and `node --test "tests/js/*.test.js"` (Node 22). Node schema test uses the ComfyUI venv, see Task 5.
 - **Version control:** this folder is not a git repository. Do not initialize git or run commit steps unless the user explicitly authorizes it; the commit steps are checkpoints for when git is enabled.
 
 ## Review Focus
@@ -221,7 +221,7 @@ git commit -m "feat: build MOSS layout prompt from boxes"
   "name": "comfyui-layout-prompt",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test tests/js/" }
+  "scripts": { "test": "node --test \"tests/js/*.test.js\"" }
 }
 ```
 
@@ -258,7 +258,7 @@ test("unknown ratio throws", () => assert.throws(() => computeSize("5:4", 1.0)))
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `node --test tests/js/`
+Run: `node --test "tests/js/*.test.js"`
 Expected: `ERR_MODULE_NOT_FOUND` for `web/size.js`.
 
 - [ ] **Step 4: Implement `web/size.js`**
@@ -267,7 +267,7 @@ Copy the ratio table and formula from the spec. `pythonRound` must match Python 
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `node --test tests/js/`
+Run: `node --test "tests/js/*.test.js"`
 Expected: 8 tests pass.
 
 - [ ] **Step 6: Commit (only if the user authorized git)**
@@ -394,7 +394,7 @@ test("undo and redo", () => {
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `node --test tests/js/`
+Run: `node --test "tests/js/*.test.js"`
 Expected: module-not-found for `web/geometry.js` and `web/state.js`.
 
 - [ ] **Step 4: Implement `web/geometry.js` and `web/state.js`**
@@ -403,7 +403,7 @@ Keep both modules DOM-free and ComfyUI-free. Use immutable updates. `deleteBox` 
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `node --test tests/js/`
+Run: `node --test "tests/js/*.test.js"`
 Expected: all JS tests pass.
 
 - [ ] **Step 6: Commit (only if the user authorized git)**
@@ -750,7 +750,7 @@ Start with exactly:
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 ```
 
-Then include: commands (`python -m pytest tests/ -v`, `node --test tests/js/`, `PYTHONPATH="C:/Users/sjmin/ComfyUI-Installs/ComfyUI/ComfyUI" E:/ComfyUI2/.venv/Scripts/python.exe -m unittest tests.node_schema_check -v`, restart/reload); architecture (`layout_core.py` pure math/JSON, `nodes.py` V3 node, `web/*` editor modules); invariants (0–1000 yxyx, multiple 16, exact JSON, labels, selected fill); key gotchas (hidden `boxes_json` widget, `executed` event, `/upload/image`, wheel event consumption, `getBoundingClientRect` mapping).
+Then include: commands (`python -m pytest tests/ -v`, `node --test "tests/js/*.test.js"`, `PYTHONPATH="C:/Users/sjmin/ComfyUI-Installs/ComfyUI/ComfyUI" E:/ComfyUI2/.venv/Scripts/python.exe -m unittest tests.node_schema_check -v`, restart/reload); architecture (`layout_core.py` pure math/JSON, `nodes.py` V3 node, `web/*` editor modules); invariants (0–1000 yxyx, multiple 16, exact JSON, labels, selected fill); key gotchas (hidden `boxes_json` widget, `executed` event, `/upload/image`, wheel event consumption, `getBoundingClientRect` mapping).
 
 - [ ] **Step 3: Verify the docs against the code**
 
