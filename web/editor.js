@@ -2,8 +2,9 @@
 //
 // Owns the parsed editor state, the canvas and reference background, and the
 // single-column box list. The canvas supports selection plus draw/move/resize
-// pointer gestures that commit once on pointer-up. Keyboard editing and
-// background persistence live in later tasks.
+// pointer gestures that commit once on pointer-up, keyboard editing (nudge,
+// delete, duplicate, deselect), and undo/redo history for layout and reference
+// transform commits. Background persistence lives in a later task.
 
 import { api } from "../../scripts/api.js";
 
@@ -22,11 +23,15 @@ import { computeSize } from "./size.js";
 import {
   addBox,
   createBox,
+  createHistory,
   deleteBox,
   deserializeState,
   duplicateBox,
   moveBox,
+  pushHistory,
+  redo,
   serializeState,
+  undo,
   updateBox,
 } from "./state.js";
 
@@ -72,6 +77,17 @@ const HEIGHT_TOLERANCE = 1;
 // Typing commits after this pause; blur flushes immediately.
 const FIELD_DEBOUNCE_MS = 150;
 
+// Undo/redo depth for layout and reference-transform snapshots.
+const HISTORY_LIMIT = 50;
+// Arrow-key nudges this close together share one undo entry, so a held key
+// (auto-repeat) or a quick burst of taps undoes as one step.
+const NUDGE_GROUP_MS = 500;
+// An OS auto-repeat can arrive after a longer initial delay than the group
+// window; a repeated keydown for the same box continues the open run.
+const NUDGE_CONTINUE_MS = 2000;
+// Wheel-zoom events this close together share one undo entry.
+const ZOOM_BURST_MS = 500;
+
 // A 20% box centered in the 0-1000 yxyx coordinate space.
 const DEFAULT_BOX_BBOX = [400, 400, 600, 600];
 const DEFAULT_BOX_LABEL = "character";
@@ -94,6 +110,44 @@ function isInteractiveTarget(target) {
     tag === "SELECT" ||
     tag === "BUTTON" ||
     tag === "A"
+  );
+}
+
+/**
+ * True for text-editing controls. Their key events (including Ctrl+Z) belong
+ * to the browser, so the editor never intercepts them.
+ */
+function isEditableTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable === true) return true;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/** Compare two normalized reference descriptors ({filename, type, subfolder}). */
+function sameRef(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.filename === b.filename &&
+    a.type === b.type &&
+    a.subfolder === b.subfolder
+  );
+}
+
+/** Compare two Background.toJSON() snapshots. */
+function sameBackground(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.mode === b.mode &&
+    a.source === b.source &&
+    a.fit === b.fit &&
+    a.zoom === b.zoom &&
+    a.panX === b.panX &&
+    a.panY === b.panY &&
+    sameRef(a.file, b.file) &&
+    sameRef(a.last, b.last)
   );
 }
 
@@ -263,6 +317,17 @@ export class LayoutEditor {
     this.pendingEdit = null;
     this.editTimer = null;
 
+    // Undo/redo entries are { layout, background } composites. Coalesced
+    // gestures (held arrows, a wheel-zoom burst) keep one entry open until
+    // they go idle or another commit starts.
+    this.history = createHistory(HISTORY_LIMIT);
+    this.nudgeGroupActive = false;
+    this.nudgeTimer = null;
+    this.lastNudgeBoxId = null;
+    this.lastNudgeAt = 0;
+    this.zoomBurstActive = false;
+    this.zoomBurstTimer = null;
+
     this.handlers = {
       onAdd: () => this.addNewBox(),
       onSelect: (id) => this.selectBox(id),
@@ -298,6 +363,7 @@ export class LayoutEditor {
     const canvas = document.createElement("canvas");
     canvas.className = "lp-canvas";
     canvas.tabIndex = 0;
+    canvas.setAttribute("tabindex", "0");
     canvas.setAttribute("role", "img");
     canvas.setAttribute("aria-label", "Layout canvas");
     stage.append(canvas);
@@ -328,7 +394,11 @@ export class LayoutEditor {
     this.abortController = new AbortController();
     root.addEventListener(
       "pointerdown",
-      (event) => event.stopPropagation(),
+      (event) => {
+        // Any new pointer action closes a coalesced undo group.
+        this.endHistoryGroups();
+        event.stopPropagation();
+      },
       { signal: this.abortController.signal },
     );
 
@@ -367,6 +437,10 @@ export class LayoutEditor {
   /** Re-read state after ComfyUI restores saved widget values. */
   syncFromWidget() {
     this.cancelPendingEdit();
+    this.endHistoryGroups();
+    // A configured workflow starts fresh; snapshots from the previous document
+    // must not be undoable into this one.
+    this.history = createHistory(HISTORY_LIMIT);
     this.state = deserializeState(this.hiddenWidget?.value ?? "");
     this.refreshCanvasSize();
     this.renderState();
@@ -378,6 +452,7 @@ export class LayoutEditor {
   /** Release the panel DOM and every listener registered by the shell. */
   destroy() {
     this.cancelPendingEdit();
+    this.endHistoryGroups();
     this.cancelScheduledRender();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -565,12 +640,12 @@ export class LayoutEditor {
     const fillButton = this.createToolButton(
       "Fill",
       "Cover the canvas with the reference (crop overflow)",
-      () => this.background?.setFit("fill"),
+      () => this.applyFit("fill"),
     );
     const fitButton = this.createToolButton(
       "Fit",
       "Contain the whole reference (letterboxed)",
-      () => this.background?.setFit("fit"),
+      () => this.applyFit("fit"),
     );
     fitGroup.append(fillButton, fitButton);
 
@@ -679,7 +754,19 @@ export class LayoutEditor {
     ) / 100;
     if (target === background.zoom) return;
 
+    const before = background.toJSON();
     background.zoomBy(target / background.zoom);
+    this.commitBackgroundChange(before);
+  }
+
+  /** Fit/Fill buttons: a committed transform change (Fit resets zoom/pan). */
+  applyFit(fit) {
+    const background = this.background;
+    if (!background) return;
+
+    const before = background.toJSON();
+    background.setFit(fit);
+    this.commitBackgroundChange(before);
   }
 
   // ---------------------------------------------------------------------
@@ -795,12 +882,14 @@ export class LayoutEditor {
       this.handleBoxCancel(event);
     }, { signal });
 
+    // Capture phase: when the editor consumes an editing key, the graph must
+    // never also act on it (Delete on the selected node, Ctrl+Z on the graph).
     window.addEventListener("keydown", (event) => {
       this.handleKeyDown(event);
-    }, { signal });
+    }, { signal, capture: true });
     window.addEventListener("keyup", (event) => {
       this.handleKeyUp(event);
-    }, { signal });
+    }, { signal, capture: true });
     window.addEventListener("blur", () => {
       this.resetTransientInput();
     }, { signal });
@@ -896,9 +985,12 @@ export class LayoutEditor {
 
     if (event.deltaY === 0 || !this.background?.hasImage()) return;
 
+    const before = this.background.toJSON();
     const point = this.canvasPoint(event);
     const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
     this.background.zoomBy(factor, point);
+    // One undo entry per wheel burst, not per notch.
+    this.commitBackgroundChange(before, { coalesce: true });
   }
 
   wantsPan(event) {
@@ -915,6 +1007,8 @@ export class LayoutEditor {
     if (this.panDrag || this.boxDrag) return;
 
     this.canvas.focus?.({ preventScroll: true });
+    // A new gesture closes any coalesced undo group before it can be extended.
+    this.endHistoryGroups();
 
     // Move bg, Space+drag, and middle-drag pan before box editing sees the
     // press; a plain left-press over a box must still select it.
@@ -926,6 +1020,7 @@ export class LayoutEditor {
         pointerId: event.pointerId,
         lastClientX: event.clientX,
         lastClientY: event.clientY,
+        baseSnapshot: this.captureSnapshot(),
       };
       this.canvas.classList.add("lp-canvas-panning");
       return;
@@ -951,6 +1046,7 @@ export class LayoutEditor {
         startPx: point,
         startBox: null,
         baseState: this.state,
+        baseSnapshot: this.captureSnapshot(),
         pointerId: event.pointerId,
         previewId: null,
       };
@@ -973,6 +1069,7 @@ export class LayoutEditor {
       startPx: point,
       startBox: { ...box, bbox: [...box.bbox] },
       baseState: this.state,
+      baseSnapshot: this.captureSnapshot(),
       pointerId: event.pointerId,
       previewId: null,
     };
@@ -1071,7 +1168,9 @@ export class LayoutEditor {
       return;
     }
 
-    // One commit per gesture: hidden widget, list, and height.
+    // One commit per gesture: history, hidden widget, list, and height.
+    this.endHistoryGroups();
+    this.pushSnapshot(drag.baseSnapshot);
     this.applyState(this.state, { rebuild: true });
     scrollRowIntoView(this.listHost, this.state.selectedId);
   }
@@ -1085,6 +1184,7 @@ export class LayoutEditor {
 
     // Revert the transient box and any geometry changes.
     this.boxDrag = null;
+    this.endHistoryGroups();
     this.state = drag.baseState;
     this.updateSelectionClasses();
     this.scheduleRender();
@@ -1113,8 +1213,24 @@ export class LayoutEditor {
     }
 
     this.panDrag = null;
+    this.commitPan(drag);
+    this.endHistoryGroups();
     this.canvas?.classList.remove("lp-canvas-panning");
     this.updateCursor();
+  }
+
+  /**
+   * Push the pre-pan composite when a pan gesture actually moved the
+   * reference. Snapshots are one per pointer-up, never per pointer-move.
+   * @param {{baseSnapshot?: {layout: object, background: object | null}}} drag
+   */
+  commitPan(drag) {
+    const base = drag?.baseSnapshot;
+    if (!base?.background) return;
+
+    const after = this.background?.toJSON() ?? null;
+    if (sameBackground(base.background, after)) return;
+    this.pushSnapshot(base);
   }
 
   isEditorEngaged() {
@@ -1123,7 +1239,25 @@ export class LayoutEditor {
     return this.canvasHovered;
   }
 
+  /** True when keyboard focus is somewhere inside the editor panel. */
+  ownsKeyboardFocus() {
+    const active = globalThis.document?.activeElement;
+    if (!active || !this.root) return false;
+    return this.root.contains(active);
+  }
+
+  /** Stop a handled shortcut before the graph's own key handlers see it. */
+  consumeKey(event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   handleKeyDown(event) {
+    // Text fields keep every key, including native Ctrl+Z text undo.
+    if (isEditableTarget(event.target)) return;
+
+    if (this.handleEditingKey(event)) return;
+
     if (event.code !== "Space" && event.key !== " ") return;
     if (isInteractiveTarget(event.target)) return;
     if (!this.isEditorEngaged()) return;
@@ -1133,15 +1267,138 @@ export class LayoutEditor {
     if (!this.panDrag) event.preventDefault();
   }
 
+  /**
+   * Keyboard editing shortcuts. They only fire while focus is inside the
+   * panel (the canvas is focused on pointer-down) and never mid-gesture, so a
+   * key can neither edit a box nor reach the graph from a text field.
+   * @param {KeyboardEvent} event
+   * @returns {boolean} whether the key was consumed
+   */
+  handleEditingKey(event) {
+    if (!this.ownsKeyboardFocus()) return false;
+    if (this.boxDrag || this.panDrag) return false;
+    if (event.altKey) return false;
+
+    const key = typeof event.key === "string" ? event.key : "";
+    const lower = key.toLowerCase();
+    const control = event.ctrlKey || event.metaKey;
+
+    if (control) {
+      if (lower === "z") {
+        this.consumeKey(event);
+        if (event.shiftKey) this.redoEdit();
+        else this.undoEdit();
+        return true;
+      }
+      if (lower === "d" && !event.shiftKey) {
+        this.consumeKey(event);
+        this.duplicateSelected();
+        return true;
+      }
+      return false;
+    }
+
+    switch (key) {
+      case "ArrowLeft":
+        this.consumeKey(event);
+        this.nudgeSelected(-1, 0, event.shiftKey ? 10 : 1, event.repeat);
+        return true;
+      case "ArrowRight":
+        this.consumeKey(event);
+        this.nudgeSelected(1, 0, event.shiftKey ? 10 : 1, event.repeat);
+        return true;
+      case "ArrowUp":
+        this.consumeKey(event);
+        this.nudgeSelected(0, -1, event.shiftKey ? 10 : 1, event.repeat);
+        return true;
+      case "ArrowDown":
+        this.consumeKey(event);
+        this.nudgeSelected(0, 1, event.shiftKey ? 10 : 1, event.repeat);
+        return true;
+      case "Delete":
+      case "Backspace":
+        this.consumeKey(event);
+        this.deleteSelected();
+        return true;
+      case "Escape":
+        this.consumeKey(event);
+        this.endHistoryGroups();
+        this.applyCanvasSelection(null);
+        return true;
+      default:
+        return false;
+    }
+  }
+
   handleKeyUp(event) {
     if (event.code !== "Space" && event.key !== " ") return;
     this.spaceHeld = false;
     this.updateCursor();
   }
 
+  /**
+   * Move the selected box by whole 0-1000 units. Consecutive arrow presses
+   * share one history entry until the group goes idle or another commit runs.
+   * @param {number} dx
+   * @param {number} dy
+   * @param {number} step 1 unit, or 10 with Shift
+   * @param {boolean} [repeat] the keydown is an OS auto-repeat
+   */
+  nudgeSelected(dx, dy, step, repeat = false) {
+    const id = this.state.selectedId;
+    const box = id ? this.findBox(id) : null;
+    if (!box) return;
+
+    // A nudge is a discrete action; a wheel-zoom burst ends here.
+    this.endZoomBurst();
+
+    const now = Date.now();
+    const bbox = moveBbox(box.bbox, dx * step, dy * step);
+    const changed = !sameBbox(box.bbox, bbox);
+    const continues =
+      Boolean(repeat) &&
+      !this.nudgeGroupActive &&
+      this.lastNudgeBoxId === id &&
+      now - this.lastNudgeAt <= NUDGE_CONTINUE_MS;
+
+    if (changed && !this.nudgeGroupActive) {
+      // Capture before mutating. The whole held-key run shares this entry.
+      if (!continues) this.pushSnapshot(this.captureSnapshot());
+      this.nudgeGroupActive = true;
+    }
+    if (changed) {
+      this.lastNudgeBoxId = id;
+      this.lastNudgeAt = now;
+    } else if (repeat && this.lastNudgeBoxId === id) {
+      // A no-op repeat at a canvas edge still belongs to the same held run.
+      this.lastNudgeAt = now;
+    }
+    this.armNudgeGroup();
+    if (!changed) return;
+
+    this.applyState(updateBox(this.state, id, { bbox }));
+  }
+
+  deleteSelected() {
+    const id = this.state.selectedId;
+    if (id) this.applyDelete(id);
+  }
+
+  duplicateSelected() {
+    const id = this.state.selectedId;
+    if (id) this.applyDuplicate(id);
+  }
+
   resetTransientInput() {
     this.spaceHeld = false;
-    this.panDrag = null;
+
+    if (this.panDrag) {
+      // A focus loss ends the pan; keep its committed transform undoable.
+      const drag = this.panDrag;
+      this.panDrag = null;
+      this.commitPan(drag);
+    }
+    this.endHistoryGroups();
 
     if (this.boxDrag) {
       // Never leave a half-finished, uncommitted box behind.
@@ -1159,6 +1416,140 @@ export class LayoutEditor {
     if (!this.canvas) return;
     const panReady = this.moveBackground || this.spaceHeld;
     this.canvas.classList.toggle("lp-canvas-pan", panReady);
+  }
+
+  // ---------------------------------------------------------------------
+  // Undo / redo history
+  // ---------------------------------------------------------------------
+  //
+  // Every entry is a composite { layout, background } where background is
+  // Background.toJSON(). Snapshots are only taken at commits: pointer-up,
+  // committed field edits, add/delete/duplicate/reorder, keyboard edits, and
+  // Fit/Fill/zoom/pan. Selection-only changes and reference mode/source
+  // toggles do not create entries.
+
+  /** A {layout, background} snapshot of the state before a committed change. */
+  captureSnapshot() {
+    return {
+      layout: this.state,
+      background: this.background ? this.background.toJSON() : null,
+    };
+  }
+
+  /** Store a pre-change composite; any new commit drops the redo stack. */
+  pushSnapshot(snapshot) {
+    if (!snapshot) return;
+    this.history = pushHistory(this.history, snapshot);
+  }
+
+  /** Keep a held-arrow run open; it ends 500 ms after the last arrow. */
+  armNudgeGroup() {
+    if (this.nudgeTimer !== null) clearTimeout(this.nudgeTimer);
+    this.nudgeTimer = setTimeout(() => {
+      this.nudgeTimer = null;
+      this.nudgeGroupActive = false;
+    }, NUDGE_GROUP_MS);
+  }
+
+  endNudgeGroup() {
+    if (this.nudgeTimer !== null) {
+      clearTimeout(this.nudgeTimer);
+      this.nudgeTimer = null;
+    }
+    this.nudgeGroupActive = false;
+    this.lastNudgeBoxId = null;
+    this.lastNudgeAt = 0;
+  }
+
+  /** Keep a wheel-zoom burst open; it ends 500 ms after the last notch. */
+  armZoomBurst() {
+    if (this.zoomBurstTimer !== null) clearTimeout(this.zoomBurstTimer);
+    this.zoomBurstTimer = setTimeout(() => {
+      this.zoomBurstTimer = null;
+      this.zoomBurstActive = false;
+    }, ZOOM_BURST_MS);
+  }
+
+  endZoomBurst() {
+    if (this.zoomBurstTimer !== null) {
+      clearTimeout(this.zoomBurstTimer);
+      this.zoomBurstTimer = null;
+    }
+    this.zoomBurstActive = false;
+  }
+
+  endHistoryGroups() {
+    this.endNudgeGroup();
+    this.endZoomBurst();
+  }
+
+  /** Push the pre-change composite for a discrete committed mutation. */
+  commitBeforeChange() {
+    this.endHistoryGroups();
+    this.pushSnapshot(this.captureSnapshot());
+  }
+
+  /**
+   * Record a Fit/Fill/zoom/pan change.
+   * @param {object} before Background.toJSON() captured before the change
+   * @param {{coalesce?: boolean}} [options] coalesce wheel-zoom notches
+   * @returns {boolean} whether the background actually changed
+   */
+  commitBackgroundChange(before, { coalesce = false } = {}) {
+    const after = this.background?.toJSON() ?? null;
+    if (sameBackground(before, after)) return false;
+
+    if (!coalesce) {
+      this.endHistoryGroups();
+      this.pushSnapshot({ layout: this.state, background: before });
+      return true;
+    }
+
+    // One entry per wheel burst: the first notch stores the pre-burst
+    // transform, later notches only keep the burst alive.
+    this.endNudgeGroup();
+    if (!this.zoomBurstActive) {
+      this.zoomBurstActive = true;
+      this.pushSnapshot({ layout: this.state, background: before });
+    }
+    this.armZoomBurst();
+    return true;
+  }
+
+  undoEdit() {
+    this.flushPendingEdit();
+    this.endHistoryGroups();
+    if (this.history.past.length === 0) return false;
+
+    const result = undo(this.history, this.captureSnapshot());
+    this.history = result.history;
+    this.restoreSnapshot(result.state);
+    return true;
+  }
+
+  redoEdit() {
+    this.flushPendingEdit();
+    this.endHistoryGroups();
+    if (this.history.future.length === 0) return false;
+
+    const result = redo(this.history, this.captureSnapshot());
+    this.history = result.history;
+    this.restoreSnapshot(result.state);
+    return true;
+  }
+
+  /**
+   * Restore an undo/redo composite: layout state, hidden widget, list, height,
+   * selection, and the reference transform.
+   * @param {{layout?: object, background?: object | null}} snapshot
+   */
+  restoreSnapshot(snapshot) {
+    this.applyState(snapshot?.layout ?? this.state, { rebuild: true });
+    if (this.background && snapshot?.background) {
+      this.background.loadStored(snapshot.background);
+    }
+    this.updateHover(null);
+    this.updateToolbar();
   }
 
   // ---------------------------------------------------------------------
@@ -1461,11 +1852,19 @@ export class LayoutEditor {
     return id;
   }
 
+  /** Whether applying a filtered field patch would change the box. */
+  patchChangesBox(id, patch) {
+    const box = this.findBox(id);
+    if (!box) return false;
+    return Object.entries(patch).some(([key, value]) => box[key] !== value);
+  }
+
   addNewBox() {
     this.flushPendingEdit();
     const box = createBox(this.newBoxId(), DEFAULT_BOX_BBOX, {
       label: DEFAULT_BOX_LABEL,
     });
+    this.commitBeforeChange();
     this.applyState(addBox(this.state, box), {
       rebuild: true,
       focusCaption: true,
@@ -1475,7 +1874,9 @@ export class LayoutEditor {
   selectBox(id) {
     if (!this.hasBox(id)) return;
     this.flushPendingEdit();
+    this.endHistoryGroups();
     if (this.state.selectedId === id) return;
+    // Selection alone is never a history entry.
     this.applyState({ ...this.state, selectedId: id });
   }
 
@@ -1489,6 +1890,10 @@ export class LayoutEditor {
     // Label changes rebuild the row; preserve buffered caption/text edits
     // first. Blur commits are quiet and never disturb the pointer target.
     this.flushPendingEdit();
+    if (!this.hasBox(id)) return;
+
+    // A blur with an unchanged value (or a label re-pick) is not a commit.
+    if (this.patchChangesBox(id, next)) this.commitBeforeChange();
 
     this.applyState(
       { ...updateBox(this.state, id, next), selectedId: id },
@@ -1502,6 +1907,8 @@ export class LayoutEditor {
     const next = this.filterPatch(patch);
     if (Object.keys(next).length === 0) return;
 
+    if (this.patchChangesBox(id, next)) this.commitBeforeChange();
+
     this.applyState(
       { ...updateBox(this.state, id, next), selectedId: id },
       { rebuild: next.label !== undefined },
@@ -1511,12 +1918,16 @@ export class LayoutEditor {
   applyDelete(id) {
     if (!this.hasBox(id)) return;
     this.flushPendingEdit();
+    if (!this.hasBox(id)) return;
+    this.commitBeforeChange();
     this.applyState(deleteBox(this.state, id), { rebuild: true });
   }
 
   applyDuplicate(id) {
     if (!this.hasBox(id)) return;
     this.flushPendingEdit();
+    if (!this.hasBox(id)) return;
+    this.commitBeforeChange();
     this.applyState(duplicateBox(this.state, id, this.newBoxId()), {
       rebuild: true,
     });
@@ -1525,6 +1936,13 @@ export class LayoutEditor {
   applyMove(id, delta) {
     if (!this.hasBox(id)) return;
     this.flushPendingEdit();
-    this.applyState(moveBox(this.state, id, delta), { rebuild: true });
+    if (!this.hasBox(id)) return;
+
+    const moved = moveBox(this.state, id, delta);
+    const changed = moved.boxes.some(
+      (box, index) => box !== this.state.boxes[index],
+    );
+    if (changed) this.commitBeforeChange();
+    this.applyState(moved, { rebuild: true });
   }
 }

@@ -4,6 +4,8 @@
 // change through the handler callbacks. Structural changes (add, delete,
 // reorder, label) re-render the rows; caption/text edits are reported as
 // input events so the editor can commit them quietly without a rebuild.
+// Row controls keep their editing keys local so graph shortcuts never fire
+// while the user is typing or using a row button.
 
 export const LABELS = Object.freeze(["character", "object", "text"]);
 
@@ -17,6 +19,39 @@ export const LABEL_COLORS = Object.freeze({
 const FALLBACK_LABEL = "object";
 const ROW_NUMBER_PAD = 2;
 const FIELD_CLASSES = Object.freeze(["lp-label", "lp-caption", "lp-text"]);
+
+// Keys a focused row owns: its own editing/navigation keys plus the editor's
+// shortcuts. They are stopped at the row so the graph cannot also delete a
+// node, pan, duplicate, or undo the workflow while the user is in the list.
+// Text inputs keep native editing and native undo.
+const LOCAL_ROW_KEYS = Object.freeze([
+  "Delete",
+  "Backspace",
+  "Escape",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  " ",
+]);
+const LOCAL_ROW_CTRL_KEYS = Object.freeze(["z", "d"]);
+
+function isLocalRowKey(event) {
+  if (LOCAL_ROW_KEYS.includes(event.key)) return true;
+  if (event.code === "Space") return true;
+  if (!(event.ctrlKey || event.metaKey)) return false;
+  const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+  return LOCAL_ROW_CTRL_KEYS.includes(key);
+}
+
+/** Stop keys a focused row owns from bubbling to the graph. */
+function keepRowKeysLocal(row) {
+  const stop = (event) => {
+    if (isLocalRowKey(event)) event.stopPropagation();
+  };
+  row.addEventListener("keydown", stop);
+  row.addEventListener("keyup", stop);
+}
 
 function displayLabel(box) {
   return LABELS.includes(box.label) ? box.label : FALLBACK_LABEL;
@@ -154,6 +189,8 @@ function createRow(box, index, total, selected, handlers) {
     if (event.target.closest("button, input, select, textarea")) return;
     handlers.onSelect?.(box.id);
   });
+
+  keepRowKeysLocal(row);
 
   return row;
 }
