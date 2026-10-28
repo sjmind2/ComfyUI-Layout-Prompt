@@ -666,7 +666,7 @@ Arrows nudge the selected box 1 unit, Shift+arrows 10; Delete/Backspace deletes;
 
 - [ ] **Step 2: Verify manually**
 
-Manual: nudge, delete, duplicate, deselect, undo/redo across add/move/resize/label/caption/text/reorder; undo/redo a reference pan/zoom restores the transform; Ctrl+Z inside a caption edits text, not the layout; keys only fire with canvas focus; Delete while typing in a caption does not delete a box; the wheel never zooms the graph.
+Manual: nudge, delete, duplicate, deselect, undo/redo across add/move/resize/label/caption/text/reorder; undo/redo a reference pan/zoom restores the transform; Ctrl+Z inside a caption edits text, not the layout; keys fire on any non-editable panel focus (canvas, row, toolbar, `+ add`, or panel background) and never reach the graph; Delete while typing in a caption does not delete a box; the wheel never zooms the graph.
 
 - [ ] **Step 3: Commit (only if the user authorized git)**
 

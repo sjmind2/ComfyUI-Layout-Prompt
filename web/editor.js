@@ -327,6 +327,9 @@ export class LayoutEditor {
 
     this.statusMessage = null;
     this.statusIsError = false;
+    // Last White/Reference mode observed by handleBackgroundChange, so a mode
+    // switch can be told apart from an ordinary background notification.
+    this.lastBackgroundMode = null;
     this.hoverId = null;
     this.moveBackground = false;
     this.spaceHeld = false;
@@ -424,6 +427,7 @@ export class LayoutEditor {
     this.background = new Background({
       onChange: () => this.handleBackgroundChange(),
     });
+    this.lastBackgroundMode = this.background.mode;
     this.lastRootWidth = root.clientWidth ?? 0;
 
     // Keep pointer gestures inside the panel from reaching the graph canvas.
@@ -437,8 +441,10 @@ export class LayoutEditor {
         // A press on the panel background focuses the canvas, so a following
         // Delete/arrow is owned by the editor instead of the graph node. Row
         // bodies focus their row in list.js; controls and fields keep their
-        // own native focus.
-        this.claimPanelFocus(event.target);
+        // own native focus. The default must be prevented too: otherwise the
+        // browser's pointerdown focus handling can return focus to <body>
+        // after canvas.focus(), and the graph gets the next key.
+        if (this.claimPanelFocus(event.target)) event.preventDefault();
       },
       { signal: this.abortController.signal },
     );
@@ -480,8 +486,10 @@ export class LayoutEditor {
     this.cancelPendingEdit();
     this.endHistoryGroups();
     // A configured workflow starts fresh; snapshots from the previous document
-    // must not be undoable into this one.
+    // must not be undoable into this one, and its inline status must not leak.
     this.history = createHistory(HISTORY_LIMIT);
+    this.statusMessage = null;
+    this.statusIsError = false;
     this.state = deserializeState(this.hiddenWidget?.value ?? "");
 
     // A load that was still in flight belongs to the previous document.
@@ -501,6 +509,9 @@ export class LayoutEditor {
     if (storedBackground && this.background) {
       this.background.loadStored(storedBackground);
     }
+    // The restored document may have switched mode; treat that as the new
+    // baseline instead of a user mode switch on the next notification.
+    if (this.background) this.lastBackgroundMode = this.background.mode;
 
     this.renderState();
     this.updateToolbar();
@@ -1064,11 +1075,21 @@ export class LayoutEditor {
   }
 
   handleBackgroundChange() {
-    // A completed background action or a mode switch supersedes an earlier
-    // inline status (for example "upload failed"); the hint returns to the
-    // live state instead of showing a stale message forever.
-    this.statusMessage = null;
-    this.statusIsError = false;
+    const background = this.background;
+    const mode = background?.mode ?? null;
+    const modeChanged =
+      this.lastBackgroundMode !== null && mode !== this.lastBackgroundMode;
+    this.lastBackgroundMode = mode;
+
+    // Neutral/loading statuses clear on any background change. An error status
+    // (decode failure, unavailable Last output) must survive the internal
+    // loadStored reloads and reflows that follow it, so it is sticky: a
+    // successful Pick file/Last clears it in its own success path, and a
+    // mode switch dismisses it here.
+    if (!this.statusIsError || modeChanged) {
+      this.statusMessage = null;
+      this.statusIsError = false;
+    }
     this.updateToolbar();
     this.scheduleRender();
     // Committed edits also persist immediately; this deferred write covers
@@ -1530,22 +1551,27 @@ export class LayoutEditor {
 
   /**
    * Focus the canvas after a pointer-down on the panel background: the root,
-   * the canvas area, the hint line, or the list background. Presses on a row
-   * body focus that row (list.js); fields and buttons keep their own focus.
+   * the canvas area, the hint line, the list header, or the list background.
+   * Presses on a row body focus that row (list.js); fields and buttons keep
+   * their own focus.
    * @param {EventTarget | null} target
+   * @returns {boolean} true when the canvas was focused (the caller should
+   *   prevent the pointerdown default so focus is not moved back to body)
    */
   claimPanelFocus(target) {
     if (!target || target === this.root) {
       this.canvas?.focus?.({ preventScroll: true });
-      return;
+      return true;
     }
-    if (isEditableTarget(target) || isInteractiveTarget(target)) return;
+    if (isEditableTarget(target) || isInteractiveTarget(target)) return false;
     if (typeof target.closest === "function" && target.closest(".lp-row")) {
-      return;
+      return false;
     }
     if (this.root?.contains?.(target)) {
       this.canvas?.focus?.({ preventScroll: true });
+      return true;
     }
+    return false;
   }
 
   /**

@@ -59,7 +59,7 @@ The reference sits under the boxes and is dimmed to about 55% brightness so the 
 - **Pick file** uploads the image to ComfyUI's `input` folder under a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name (`type=input`, `overwrite=true`). Only the descriptor `{filename, type, subfolder}` is stored, so the reference survives a workflow save and a ComfyUI restart as long as the file remains. A workflow moved to another machine may not find the file.
 - **Last** uses the newest image from the most recent `executed` event (the last image when an event reports several). New executions update the button but never replace the displayed reference on their own; click `Last` to apply it. After a reload, the descriptor stored with the workflow is offered until a newer execution arrives. Last-output images often live in ComfyUI's temp folder and can be cleaned up later.
 - A small `file` or `last` badge on the toolbar names the stored reference source (the badge remains visible while `White` is selected).
-- If an upload, its image decode, or a `Last` load fails, the previous reference is kept and the hint line shows an error. A successful upload or `Last` load, a mode switch, or another committed background action clears that message.
+- If an upload, its image decode, or a `Last` load fails, the previous reference is kept and the hint line shows an error. A successful upload or `Last` load, or a White/Reference switch, clears that message; it survives the internal reference reload and canvas reflow that follow the failure.
 
 ### Transform
 

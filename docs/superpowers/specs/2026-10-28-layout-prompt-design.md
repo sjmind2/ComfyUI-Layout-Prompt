@@ -145,8 +145,8 @@ Boxes:
 - Draw: left-drag on empty canvas. A drag shorter than 3 display px is ignored. New boxes are clamped to the canvas.
 - Move: left-drag inside a box.
 - Resize: 8 handles (corners and edge midpoints), 6 display px hit radius. Minimum size 3 display px; clamped to the canvas.
-- Delete: Delete/Backspace when the canvas has focus, or the row's ✕.
-- Duplicate: Ctrl+D, or a duplicate control in the row. Offset by 3% of the canvas (30 units) and clamp; select the copy.
+- Delete: Delete/Backspace while the panel has keyboard focus, or the row's ✕.
+- Duplicate: Ctrl+D, or a duplicate control in the row. Translate the copy by 3% of the canvas (30 units) per axis while preserving its size: forward when it fits, backward near the right/bottom edge, and unchanged for a full-frame box. Select the copy.
 - Nudge: arrow keys move the selected box 1 unit; Shift+arrow 10 units.
 - Hit-test topmost (last in list order) first. The selected box is painted last, so overlapping boxes never hide it.
 - Pointer coordinates are computed from `getBoundingClientRect()`, not client pixels, so graph zoom does not skew them.
@@ -172,7 +172,7 @@ Keyboard and pointer:
 | Resize box | drag any of 8 handles |
 | Select | click box or row |
 | Deselect | Esc / click empty canvas |
-| Delete | Delete / Backspace (canvas focus) or row ✕ |
+| Delete | Delete / Backspace (panel focus) or row ✕ |
 | Duplicate | Ctrl+D |
 | Nudge | arrows; Shift+arrows = 10 units |
 | Pan reference | Move bg mode drag, Space+drag, or middle-drag |
@@ -180,7 +180,7 @@ Keyboard and pointer:
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z (outside text fields) |
 
 - Wheel over the canvas is consumed by the editor (preventDefault + stopPropagation) so the graph does not zoom.
-- Keys are only intercepted when the canvas or a row control has focus; typing in a caption must not delete a box.
+- Keys are intercepted when any non-editable element inside the editor panel has focus (canvas, row, row control, toolbar, `+ add`, or panel background); typing in a caption must not delete a box.
 - Ctrl+Z inside a caption/text input is left to the browser's field undo.
 
 ## Box list
