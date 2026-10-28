@@ -7,6 +7,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 import { LayoutEditor } from "./editor.js";
+import { DOM_WIDGET_MARGIN } from "./editor_height.js";
+import { isNodeSize } from "./node_size.js";
 import { injectStyles } from "./styles.js";
 
 const NODE_NAME = "LayoutPromptBuilder";
@@ -104,6 +106,9 @@ app.registerExtension({
       node.addDOMWidget(DOM_WIDGET_NAME, DOM_WIDGET_TYPE, container, {
         serialize: false,
         hideOnZoom: false,
+        // The frontend insets the element by this margin on every side; the
+        // editor's height callbacks include it.
+        margin: DOM_WIDGET_MARGIN,
         getHeight: editorHeight,
         getMinHeight: editorHeight,
         getMaxHeight: editorHeight,
@@ -116,7 +121,8 @@ app.registerExtension({
       editor.mount(container);
 
       const computed = node.computeSize();
-      node.setSize([DEFAULT_WIDTH, Math.max(node.size[1], computed[1])]);
+      const initialHeight = isNodeSize(node.size) ? node.size[1] : 0;
+      node.setSize([DEFAULT_WIDTH, Math.max(initialHeight, computed[1])]);
     });
 
     chainCallback(nodeType.prototype, "onConfigure", function () {
@@ -127,11 +133,7 @@ app.registerExtension({
       // A hand-edited or older workflow must not restore narrower than the
       // panel minimum; the toolbar would clip. Clamp after the editor has
       // re-read the restored state.
-      if (
-        Array.isArray(this.size) &&
-        Number.isFinite(this.size[0]) &&
-        this.size[0] < MIN_WIDTH
-      ) {
+      if (isNodeSize(this.size) && this.size[0] < MIN_WIDTH) {
         if (typeof this.setSize === "function") {
           this.setSize([MIN_WIDTH, this.size[1]]);
         } else {
@@ -141,7 +143,7 @@ app.registerExtension({
     });
 
     chainCallback(nodeType.prototype, "onResize", function (size) {
-      if (!Array.isArray(size)) return;
+      if (!isNodeSize(size)) return;
       if (size[0] < MIN_WIDTH) size[0] = MIN_WIDTH;
       if (this.size && this.size[0] < MIN_WIDTH) this.size[0] = MIN_WIDTH;
     });

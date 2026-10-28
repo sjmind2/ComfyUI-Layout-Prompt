@@ -10,6 +10,10 @@ import { api } from "../../scripts/api.js";
 
 import { Background, ZOOM_MAX, ZOOM_MIN } from "./background.js";
 import { CanvasView, paintOrder } from "./canvas.js";
+import {
+  CANVAS_HORIZONTAL_GUTTER,
+  computeEditorHeight,
+} from "./editor_height.js";
 import { hitTest, normalizeBbox, rectToBbox } from "./geometry.js";
 import {
   captureFieldFocus,
@@ -19,6 +23,7 @@ import {
   scrollRowIntoView,
   updateRowSelection,
 } from "./list.js";
+import { isNodeSize } from "./node_size.js";
 import { computeSize } from "./size.js";
 import {
   addBox,
@@ -35,31 +40,10 @@ import {
   updateBox,
 } from "./state.js";
 
-// These heights mirror the --lp-list-* custom properties in styles.js.
-const CONTAINER_VERTICAL_PADDING = 6;
-const LIST_HEADER_HEIGHT = 24;
-const LIST_HEADER_GAP = 4;
-const LIST_ROW_HEIGHT = 28;
-const LIST_ROW_GAP = 2;
-const MAX_VISIBLE_ROWS = 5;
-const MIN_VISIBLE_ROWS = 1;
-
 // Canvas stack geometry, mirroring the .lp-canvas-* rules in styles.js.
 const CANVAS_MAX_HEIGHT = 340;
-const CANVAS_HORIZONTAL_GUTTER = 24;
 const MIN_CANVAS_WIDTH = 120;
 const DEFAULT_NODE_WIDTH = 560;
-const CANVAS_BOTTOM_GAP = 6;
-const TOOLBAR_HEIGHT = 24;
-const TOOLBAR_HINT_GAP = 2;
-const HINT_HEIGHT = 14;
-const HINT_LIST_GAP = 6;
-const CANVAS_STACK_HEIGHT =
-  CANVAS_BOTTOM_GAP +
-  TOOLBAR_HEIGHT +
-  TOOLBAR_HINT_GAP +
-  HINT_HEIGHT +
-  HINT_LIST_GAP;
 
 const DEFAULT_ASPECT_RATIO = "1:1 (Square)";
 const DEFAULT_MEGAPIXELS = 1;
@@ -340,7 +324,7 @@ export class LayoutEditor {
     this.renderFrame = null;
     this.resizeObserver = null;
     this.lastRootWidth = 0;
-    this.lastNodeHeight = Array.isArray(node?.size) ? node.size[1] : null;
+    this.lastNodeHeight = isNodeSize(node?.size) ? node.size[1] : null;
     this.userSizedHeight = false;
     this.applyingSize = false;
     this.widgetWrappers = [];
@@ -462,23 +446,10 @@ export class LayoutEditor {
     this.requestHeight();
   }
 
-  /** Height of the editor panel in CSS pixels. */
+  /** Height of the editor panel in CSS pixels (includes the DOM widget margin). */
   computeHeight() {
     const size = this.canvasSize ?? this.computeCanvasSize();
-    const count = this.state.boxes.length;
-    const visibleRows = Math.max(
-      MIN_VISIBLE_ROWS,
-      Math.min(count, MAX_VISIBLE_ROWS),
-    );
-    return (
-      CONTAINER_VERTICAL_PADDING +
-      size.height +
-      CANVAS_STACK_HEIGHT +
-      LIST_HEADER_HEIGHT +
-      LIST_HEADER_GAP +
-      visibleRows * LIST_ROW_HEIGHT +
-      (visibleRows - 1) * LIST_ROW_GAP
-    );
+    return computeEditorHeight(size.height, this.state.boxes.length);
   }
 
   /** Re-read state after ComfyUI restores saved widget values. */
@@ -601,9 +572,7 @@ export class LayoutEditor {
 
   nodeWidth() {
     const size = this.node?.size;
-    if (Array.isArray(size) && Number.isFinite(size[0]) && size[0] > 0) {
-      return size[0];
-    }
+    if (isNodeSize(size) && size[0] > 0) return size[0];
     return DEFAULT_NODE_WIDTH;
   }
 
@@ -2025,7 +1994,7 @@ export class LayoutEditor {
   }
 
   handleNodeResize(size) {
-    if (!Array.isArray(size)) return;
+    if (!isNodeSize(size)) return;
 
     // Recompute the canvas first: a width change can change the canvas height
     // (and therefore the node height required to fit it).
@@ -2075,21 +2044,19 @@ export class LayoutEditor {
   requiredNodeHeight() {
     if (typeof this.node?.computeSize === "function") {
       const computed = this.node.computeSize();
-      if (Array.isArray(computed) && Number.isFinite(computed[1])) {
-        return computed[1];
-      }
+      if (isNodeSize(computed)) return computed[1];
     }
     return this.computeHeight();
   }
 
   applyNodeHeight(height) {
     const node = this.node;
-    if (!node?.setSize || !Array.isArray(node.size)) return;
+    if (!node?.setSize || !isNodeSize(node.size)) return;
 
     this.applyingSize = true;
     try {
       node.setSize([node.size[0], Math.round(height)]);
-      this.lastNodeHeight = Array.isArray(node.size)
+      this.lastNodeHeight = isNodeSize(node.size)
         ? node.size[1]
         : Math.round(height);
     } finally {
@@ -2105,7 +2072,7 @@ export class LayoutEditor {
     const node = this.node;
     if (!node) return;
 
-    if (Array.isArray(node.size) && typeof node.computeSize === "function") {
+    if (isNodeSize(node.size) && typeof node.computeSize === "function") {
       const required = this.requiredNodeHeight();
       const height = node.size[1];
       if (Number.isFinite(required) && Number.isFinite(height)) {

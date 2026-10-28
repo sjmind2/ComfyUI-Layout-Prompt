@@ -135,7 +135,7 @@ height = round(h_ratio * scale / 16) * 16
 Display:
 
 - The canvas represents the exact output rectangle: the selected aspect ratio and size, scaled down to fit the node.
-- Default display: fit the ratio into a box of max width `node width − 24` and max height 340 px. A square is about 340×340; 16:9 is about 536×301; 9:16 about 191×340. Crisp at devicePixelRatio.
+- Default display: fit the ratio into a box of max width `node width − 28` (10 px DOM-widget margin on each side plus 4 px panel padding on each side) and max height 340 px. A square is about 340×340; 16:9 is about 532×299; 9:16 about 191×340. Crisp at devicePixelRatio.
 - The reference is dimmed to about 55% brightness so boxes read clearly. There is no dim toggle in v1.
 - The reference is guidance only. It is never part of the layout JSON, the node output, or the graph.
 

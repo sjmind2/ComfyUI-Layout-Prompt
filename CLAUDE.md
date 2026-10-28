@@ -14,10 +14,10 @@ Run from the repository root (this checkout is also the installed custom node):
 # Python core (system Python 3.12 with pytest): 19 tests
 python -m pytest tests/ -v
 
-# Pure frontend modules (Node 22 node:test): 29 tests
+# Pure frontend modules (Node 22 node:test): 40 tests
 npm test
 
-# Equivalent direct invocation (same 29 tests)
+# Equivalent direct invocation (same 40 tests)
 node --test "tests/js/*.test.js"
 
 # Node schema and execute behavior (ComfyUI venv, no pytest): 4 tests
@@ -39,6 +39,8 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - `__init__.py` - `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY = "./web"`.
 - `web/layout_prompt.js` - extension shell. Registers `Moss.LayoutPromptBuilder`, hides the `boxes_json` widget, adds the DOM widget `layout_editor` (type `LayoutEditor`), chains `onNodeCreated` / `onConfigure` / `onResize` / `onRemoved`, and owns the global `executed` listener plus the `liveEditors` registry.
 - `web/editor.js` - `LayoutEditor`: owns layout state, history, selection, toolbar, pointer/keyboard editing, file upload, `Last`, background persistence, and node-height management.
+- `web/editor_height.js` - DOM-free height/width math for the editor panel: `computeEditorHeight()` (list rows capped at five), `DOM_WIDGET_MARGIN`, and `CANVAS_HORIZONTAL_GUTTER`.
+- `web/node_size.js` - DOM-free `isNodeSize()` guard for litegraph node sizes and `computeSize()` results (they may be Float64Array-backed proxies, not `Array`s).
 - `web/canvas.js` - `CanvasView`: device-pixel-ratio backing store, paint order (selected last), box/hover/selection drawing, and the clipped, dimmed reference layer.
 - `web/background.js` - `Background`: mode, source, file/last descriptors, Fill/Fit, zoom, pan, pan clamping, image loading via `api.apiURL("/view?...")`, and the `toJSON()` / `loadStored()` snapshot used for persistence and undo.
 - `web/geometry.js` - DOM-free `normalizeBbox`, `bboxToRect`, `rectToBbox`, and `hitTest` (8 handles, topmost box wins).
@@ -46,7 +48,7 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - `web/size.js` - zero-dependency mirror of `compute_size`, including Python's round-half-to-even behavior (`pythonRound`), used by the editor for canvas sizing and the live size hint.
 - `web/list.js` - single-column box list renderer, label list/colors, selection helpers, and row-local key handling.
 - `web/styles.js` - `injectStyles()`, scoped under `.layout-prompt-editor`.
-- Tests: `tests/test_layout_core.py` (pytest, 19); `tests/js/*.test.js` (node:test, 29); `tests/node_schema_check.py` (unittest, 4, ComfyUI venv); `tests/parity_moss_check.py` (unittest, 5, real ComfyUI chain).
+- Tests: `tests/test_layout_core.py` (pytest, 19); `tests/js/*.test.js` (node:test, 40); `tests/node_schema_check.py` (unittest, 4, ComfyUI venv); `tests/parity_moss_check.py` (unittest, 5, real ComfyUI chain).
 
 ## Invariants
 
@@ -72,6 +74,7 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - **Parity check path shadowing.** This repo ships `nodes.py`, and `comfy_extras/nodes_bounding_boxes.py` does `import nodes`; running `python -m unittest` from the project root puts that root first on `sys.path`. `tests/parity_moss_check.py` temporarily removes the project root before importing ComfyUI modules and restores it afterward. Do not remove that guard.
 - **Two interpreters.** The ComfyUI venv has no pytest, and system Python has no `comfy_api`/`comfy_extras`. Keep `tests/test_layout_core.py` free of ComfyUI imports, and run `node_schema_check.py` / `parity_moss_check.py` with the venv via `unittest`. Neither venv-only check is named `test_*.py`, so system pytest does not collect them.
 - **Keyboard scope.** Editing keys fire when focus is on any non-editable element inside the editor root (`ownsKeyboardFocus()`): canvas, row (row-body clicks focus the row; rows are `tabIndex = -1`), row controls, toolbar, `+ add`, or panel background (background presses focus the canvas and call `preventDefault()`; without it the browser can return focus to `<body>`). Inputs/selects/textarea/contenteditable keep native editing and native undo. The window `keydown` handler runs in the capture phase and consumes handled keys so Delete, arrows, and Ctrl+Z do not reach the graph. After a list rebuild, focus returns to the selected row (or canvas) so the next key stays owned. The row renderer also stops its local keys from bubbling.
-- **DOM widget height.** `addDOMWidget` uses `editor.computeHeight()` for getHeight/getMinHeight/getMaxHeight; the editor grows/shrinks the node around the panel, and the extension's chained `onResize` enforces the 440 px minimum width. Do not hardcode panel heights in the extension.
+- **DOM widget height.** `addDOMWidget` uses `editor.computeHeight()` for getHeight/getMinHeight/getMaxHeight; the editor grows/shrinks the node around the panel, and the extension's chained `onResize` enforces the 440 px minimum width. The frontend sizes the widget element to `computedHeight - 2 * margin` (default margin 10 px), so `computeEditorHeight()` in `web/editor_height.js` includes that margin and the extension passes `margin: DOM_WIDGET_MARGIN` explicitly; without it the list is clipped by 20 px. Do not hardcode panel heights in the extension.
+- **Node sizes are not `Array`s.** In the current Vue frontend `node.size` is a Float64Array wrapped in a reactive proxy (`Array.isArray` and `ArrayBuffer.isView` both report false); `computeSize()` results are array-like too. Always use `isNodeSize()` from `web/node_size.js` before reading or applying sizes; the height/width logic silently does nothing when it uses `Array.isArray`.
 - **Pure modules.** `layout_core.py`, `web/size.js`, `web/geometry.js`, and `web/state.js` must stay DOM-free and ComfyUI-free; they are the automated-test surface.
 - **Malformed `boxes_json`.** `parse_boxes()` returns `[]` for invalid/wrong-version input, and `nodes.py` logs a warning only when the string was non-empty. The Python fallback is the plain summary; the frontend always writes valid JSON.
