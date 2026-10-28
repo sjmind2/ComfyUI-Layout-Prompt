@@ -1,9 +1,15 @@
 // DOM shell for the Layout Prompt Builder node.
 //
-// Owns the parsed editor state and mounts the editor panel inside the node's
-// DOM widget. This task adds the single-column box list; the canvas and
-// reference controls are added by later tasks.
+// Owns the parsed editor state, the canvas and reference background, and the
+// single-column box list. This task adds the output canvas, selection visuals,
+// the reference layer, and its Fit/Fill/zoom/pan transform. Pointer editing,
+// keyboard editing, and background persistence live in later tasks.
 
+import { api } from "../../scripts/api.js";
+
+import { Background, ZOOM_MAX, ZOOM_MIN } from "./background.js";
+import { CanvasView } from "./canvas.js";
+import { hitTest } from "./geometry.js";
 import {
   captureFieldFocus,
   LABELS,
@@ -11,6 +17,7 @@ import {
   restoreFieldFocus,
   updateRowSelection,
 } from "./list.js";
+import { computeSize } from "./size.js";
 import {
   addBox,
   createBox,
@@ -31,6 +38,31 @@ const LIST_ROW_GAP = 2;
 const MAX_VISIBLE_ROWS = 5;
 const MIN_VISIBLE_ROWS = 1;
 
+// Canvas stack geometry, mirroring the .lp-canvas-* rules in styles.js.
+const CANVAS_MAX_HEIGHT = 340;
+const CANVAS_HORIZONTAL_GUTTER = 24;
+const MIN_CANVAS_WIDTH = 120;
+const DEFAULT_NODE_WIDTH = 560;
+const CANVAS_BOTTOM_GAP = 6;
+const TOOLBAR_HEIGHT = 24;
+const TOOLBAR_HINT_GAP = 2;
+const HINT_HEIGHT = 14;
+const HINT_LIST_GAP = 6;
+const CANVAS_STACK_HEIGHT =
+  CANVAS_BOTTOM_GAP +
+  TOOLBAR_HEIGHT +
+  TOOLBAR_HINT_GAP +
+  HINT_HEIGHT +
+  HINT_LIST_GAP;
+
+const DEFAULT_ASPECT_RATIO = "1:1 (Square)";
+const DEFAULT_MEGAPIXELS = 1;
+const ZOOM_BUTTON_STEP = 0.1;
+const HOVER_HANDLE_RADIUS = 6;
+// A node that is taller than the panel by more than this is treated as a
+// manual enlargement and is never auto-shrunk.
+const HEIGHT_TOLERANCE = 1;
+
 // Typing commits after this pause; blur flushes immediately.
 const FIELD_DEBOUNCE_MS = 150;
 
@@ -43,6 +75,45 @@ let boxIdCounter = 0;
 function nextBoxId() {
   boxIdCounter += 1;
   return `box_${Date.now().toString(36)}_${boxIdCounter.toString(36)}`;
+}
+
+/** True for controls that consume Space themselves (typing, buttons, links). */
+function isInteractiveTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable === true) return true;
+  const tag = target.tagName;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    tag === "BUTTON" ||
+    tag === "A"
+  );
+}
+
+/** A unique input-folder filename for an uploaded reference. */
+function uniqueUploadName(node, originalName) {
+  const name = typeof originalName === "string" ? originalName : "";
+  const dot = name.lastIndexOf(".");
+  const rawExtension = dot > 0 ? name.slice(dot).toLowerCase() : "";
+  const extension = /^\.[a-z0-9]{1,8}$/.test(rawExtension)
+    ? rawExtension
+    : "";
+  const rawNodeId = node?.id;
+  const nodePart =
+    String(rawNodeId ?? "node")
+      .replace(/[^a-z0-9_-]/gi, "")
+      .slice(0, 24) || "node";
+  const stamp = Date.now().toString(36);
+  const random = Math.floor(Math.random() * 0xffffff).toString(36);
+  return `layout_ref_${nodePart}_${stamp}_${random}${extension}`;
+}
+
+/** Toggle a button's pressed styling and aria state. */
+function setPressed(button, pressed) {
+  if (!button) return;
+  button.classList.toggle("lp-active", pressed);
+  button.setAttribute("aria-pressed", pressed ? "true" : "false");
 }
 
 export class LayoutEditor {
@@ -60,6 +131,42 @@ export class LayoutEditor {
     this.listHost = null;
     this.abortController = null;
 
+    this.canvas = null;
+    this.canvasView = null;
+    this.canvasSize = null;
+    this.background = null;
+
+    this.modeButtons = null;
+    this.fitButtons = null;
+    this.zoomLabel = null;
+    this.moveButton = null;
+    this.fileInput = null;
+    this.hintElement = null;
+
+    this.statusMessage = null;
+    this.statusIsError = false;
+    this.hoverId = null;
+    this.moveBackground = false;
+    this.spaceHeld = false;
+    this.canvasHovered = false;
+    this.panDrag = null;
+
+    this.renderFrame = null;
+    this.resizeObserver = null;
+    this.lastRootWidth = 0;
+    this.lastNodeHeight = Array.isArray(node?.size) ? node.size[1] : null;
+    this.userSizedHeight = false;
+    this.applyingSize = false;
+    this.widgetWrappers = [];
+    this.resizeWrapper = null;
+
+    this.raf =
+      globalThis.requestAnimationFrame?.bind(globalThis) ??
+      ((callback) => setTimeout(callback, 16));
+    this.caf =
+      globalThis.cancelAnimationFrame?.bind(globalThis) ??
+      ((handle) => clearTimeout(handle));
+
     this.pendingEdit = null;
     this.editTimer = null;
 
@@ -72,6 +179,10 @@ export class LayoutEditor {
       onDuplicate: (id) => this.applyDuplicate(id),
       onMove: (id, delta) => this.applyMove(id, delta),
     };
+
+    // Compute this before mount so the DOM widget height callback has a
+    // canvas height even if it is queried during creation.
+    this.canvasSize = this.computeCanvasSize();
   }
 
   /**
@@ -85,13 +196,40 @@ export class LayoutEditor {
     const root = document.createElement("div");
     root.className = "lp-root";
 
+    const canvasArea = document.createElement("div");
+    canvasArea.className = "lp-canvas-area";
+
+    const stage = document.createElement("div");
+    stage.className = "lp-canvas-stage";
+
+    const canvas = document.createElement("canvas");
+    canvas.className = "lp-canvas";
+    canvas.tabIndex = 0;
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", "Layout canvas");
+    stage.append(canvas);
+
+    const toolbar = this.buildToolbar();
+    const hint = document.createElement("div");
+    hint.className = "lp-hint";
+    hint.setAttribute("role", "status");
+
+    canvasArea.append(stage, toolbar, hint);
+
     const listHost = document.createElement("div");
     listHost.className = "lp-list-host";
-    root.append(listHost);
+    root.append(canvasArea, listHost);
     container.append(root);
 
     this.root = root;
     this.listHost = listHost;
+    this.canvas = canvas;
+    this.hintElement = hint;
+    this.canvasView = new CanvasView(canvas);
+    this.background = new Background({
+      onChange: () => this.handleBackgroundChange(),
+    });
+    this.lastRootWidth = root.clientWidth ?? 0;
 
     // Keep pointer gestures inside the panel from reaching the graph canvas.
     this.abortController = new AbortController();
@@ -101,12 +239,22 @@ export class LayoutEditor {
       { signal: this.abortController.signal },
     );
 
+    this.addCanvasListeners();
+    this.wireOutputWidgets();
+    this.wireNodeResize();
+    this.observeRootResize(root);
+
+    this.refreshCanvasSize();
     this.renderState();
+    this.updateToolbar();
+    this.updateCursor();
+    this.scheduleRender();
     this.requestHeight();
   }
 
   /** Height of the editor panel in CSS pixels. */
   computeHeight() {
+    const size = this.canvasSize ?? this.computeCanvasSize();
     const count = this.state.boxes.length;
     const visibleRows = Math.max(
       MIN_VISIBLE_ROWS,
@@ -114,6 +262,8 @@ export class LayoutEditor {
     );
     return (
       CONTAINER_VERTICAL_PADDING +
+      size.height +
+      CANVAS_STACK_HEIGHT +
       LIST_HEADER_HEIGHT +
       LIST_HEADER_GAP +
       visibleRows * LIST_ROW_HEIGHT +
@@ -125,15 +275,27 @@ export class LayoutEditor {
   syncFromWidget() {
     this.cancelPendingEdit();
     this.state = deserializeState(this.hiddenWidget?.value ?? "");
+    this.refreshCanvasSize();
     this.renderState();
+    this.updateToolbar();
+    this.scheduleRender();
     this.requestHeight();
   }
 
   /** Release the panel DOM and every listener registered by the shell. */
   destroy() {
     this.cancelPendingEdit();
+    this.cancelScheduledRender();
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+
     this.abortController?.abort();
     this.abortController = null;
+
+    this.restoreWidgetCallbacks();
+    this.restoreNodeResize();
+
+    if (this.background) this.background.onChange = null;
 
     if (this.root?.parentNode) {
       this.root.parentNode.removeChild(this.root);
@@ -142,6 +304,575 @@ export class LayoutEditor {
     this.root = null;
     this.listHost = null;
     this.container = null;
+    this.canvas = null;
+    this.canvasView = null;
+    this.background = null;
+    this.canvasSize = null;
+    this.hintElement = null;
+    this.modeButtons = null;
+    this.fitButtons = null;
+    this.zoomLabel = null;
+    this.moveButton = null;
+    this.fileInput = null;
+    this.panDrag = null;
+    this.renderFrame = null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Canvas sizing
+  // ---------------------------------------------------------------------
+
+  /** Current widget value by name (undefined when the widget is missing). */
+  widgetValue(name) {
+    const widget = this.node?.widgets?.find(
+      (candidate) => candidate?.name === name,
+    );
+    return widget?.value;
+  }
+
+  /** Output pixels implied by the aspect_ratio / megapixels widgets. */
+  outputSize() {
+    const rawRatio = this.widgetValue("aspect_ratio");
+    const ratio =
+      typeof rawRatio === "string" && rawRatio
+        ? rawRatio
+        : DEFAULT_ASPECT_RATIO;
+    const rawMegapixels = Number(
+      this.widgetValue("megapixels") ?? DEFAULT_MEGAPIXELS,
+    );
+    const megapixels =
+      Number.isFinite(rawMegapixels) && rawMegapixels > 0
+        ? rawMegapixels
+        : DEFAULT_MEGAPIXELS;
+
+    try {
+      return computeSize(ratio, megapixels);
+    } catch {
+      return computeSize(DEFAULT_ASPECT_RATIO, megapixels);
+    }
+  }
+
+  nodeWidth() {
+    const size = this.node?.size;
+    if (Array.isArray(size) && Number.isFinite(size[0]) && size[0] > 0) {
+      return size[0];
+    }
+    return DEFAULT_NODE_WIDTH;
+  }
+
+  /**
+   * Display size of the output rectangle: the exact output aspect fitted into
+   * (node width - 24) by 340 CSS pixels.
+   * @returns {{width: number, height: number, outputWidth: number,
+   *            outputHeight: number}}
+   */
+  computeCanvasSize() {
+    const [outputWidth, outputHeight] = this.outputSize();
+    const maxWidth = Math.max(
+      MIN_CANVAS_WIDTH,
+      this.nodeWidth() - CANVAS_HORIZONTAL_GUTTER,
+    );
+    const scale = Math.min(
+      maxWidth / outputWidth,
+      CANVAS_MAX_HEIGHT / outputHeight,
+    );
+    return {
+      width: Math.max(1, Math.round(outputWidth * scale)),
+      height: Math.max(1, Math.round(outputHeight * scale)),
+      outputWidth,
+      outputHeight,
+    };
+  }
+
+  /** Recompute the canvas display size and reflow the reference layer. */
+  refreshCanvasSize() {
+    if (!this.canvasView) return;
+
+    const next = this.computeCanvasSize();
+    this.canvasSize = next;
+    this.canvasView.resize(next.width, next.height);
+    // Preserves the source point at the center and the zoom when the base
+    // Fill/Fit scale changes.
+    this.background?.setViewport(next.width, next.height);
+    this.updateHint();
+  }
+
+  onOutputSettingsChanged() {
+    this.refreshCanvasSize();
+    this.scheduleRender();
+    this.requestHeight();
+  }
+
+  // ---------------------------------------------------------------------
+  // Toolbar
+  // ---------------------------------------------------------------------
+
+  /**
+   * @param {string} label
+   * @param {string} title
+   * @param {() => void} onClick
+   * @returns {HTMLButtonElement}
+   */
+  createToolButton(label, title, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "lp-tool";
+    button.textContent = label;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onClick();
+    });
+    return button;
+  }
+
+  buildToolbar() {
+    const toolbar = document.createElement("div");
+    toolbar.className = "lp-toolbar";
+
+    const modeGroup = document.createElement("div");
+    modeGroup.className = "lp-segment";
+    modeGroup.setAttribute("role", "group");
+    modeGroup.setAttribute("aria-label", "Background mode");
+    const whiteButton = this.createToolButton(
+      "White",
+      "Show a plain white canvas",
+      () => this.background?.setMode("white"),
+    );
+    const referenceButton = this.createToolButton(
+      "Reference",
+      "Show the reference image under the boxes",
+      () => this.background?.setMode("reference"),
+    );
+    modeGroup.append(whiteButton, referenceButton);
+
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = "image/*";
+    fileInput.className = "lp-file-input";
+    fileInput.hidden = true;
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0] ?? null;
+      fileInput.value = "";
+      if (file) void this.uploadReference(file);
+    });
+
+    const pickButton = this.createToolButton(
+      "Pick file",
+      "Upload a reference image from disk",
+      () => fileInput.click(),
+    );
+
+    const fitGroup = document.createElement("div");
+    fitGroup.className = "lp-segment";
+    fitGroup.setAttribute("role", "group");
+    fitGroup.setAttribute("aria-label", "Reference fit");
+    const fillButton = this.createToolButton(
+      "Fill",
+      "Cover the canvas with the reference (crop overflow)",
+      () => this.background?.setFit("fill"),
+    );
+    const fitButton = this.createToolButton(
+      "Fit",
+      "Contain the whole reference (letterboxed)",
+      () => this.background?.setFit("fit"),
+    );
+    fitGroup.append(fillButton, fitButton);
+
+    const zoomOut = this.createToolButton(
+      "−",
+      "Zoom the reference out by 10%",
+      () => this.zoomStep(-1),
+    );
+    const zoomLabel = document.createElement("span");
+    zoomLabel.className = "lp-zoom";
+    zoomLabel.textContent = "100%";
+    zoomLabel.title = "Reference zoom (100% = the Fill/Fit scale)";
+    const zoomIn = this.createToolButton(
+      "+",
+      "Zoom the reference in by 10%",
+      () => this.zoomStep(1),
+    );
+
+    const moveButton = this.createToolButton(
+      "Move bg",
+      "Drag the reference image (also Space-drag or middle-drag)",
+      () => {
+        this.moveBackground = !this.moveBackground;
+        this.updateCursor();
+        this.updateToolbar();
+      },
+    );
+
+    toolbar.append(
+      modeGroup,
+      pickButton,
+      fitGroup,
+      zoomOut,
+      zoomLabel,
+      zoomIn,
+      moveButton,
+      fileInput,
+    );
+
+    this.modeButtons = { white: whiteButton, reference: referenceButton };
+    this.fitButtons = { fill: fillButton, fit: fitButton };
+    this.zoomLabel = zoomLabel;
+    this.moveButton = moveButton;
+    this.fileInput = fileInput;
+
+    return toolbar;
+  }
+
+  updateToolbar() {
+    const background = this.background;
+    if (!background) return;
+
+    setPressed(this.modeButtons?.white, background.mode === "white");
+    setPressed(this.modeButtons?.reference, background.mode === "reference");
+    setPressed(this.fitButtons?.fill, background.fit === "fill");
+    setPressed(this.fitButtons?.fit, background.fit === "fit");
+    setPressed(this.moveButton, this.moveBackground);
+
+    if (this.zoomLabel) {
+      const zoomText = `${Math.round(background.zoom * 100)}%`;
+      if (this.zoomLabel.textContent !== zoomText) {
+        this.zoomLabel.textContent = zoomText;
+      }
+    }
+
+    this.updateHint();
+  }
+
+  updateHint() {
+    if (!this.hintElement) return;
+
+    const size = this.canvasSize ?? this.computeCanvasSize();
+    const background = this.background;
+    let message = `${size.outputWidth} × ${size.outputHeight} · wheel zoom · space / middle-drag pan`;
+    let isError = false;
+
+    if (this.statusMessage) {
+      message = this.statusMessage;
+      isError = this.statusIsError;
+    } else if (background?.error) {
+      message = background.error;
+      isError = true;
+    } else if (background?.loading) {
+      message = "Loading reference…";
+    } else if (background?.mode === "reference" && !background.hasImage()) {
+      message = "No reference yet — use Pick file.";
+    }
+
+    if (this.hintElement.textContent !== message) {
+      this.hintElement.textContent = message;
+      this.hintElement.title = message;
+    }
+    this.hintElement.classList.toggle("lp-hint-error", isError);
+  }
+
+  /** −/+ toolbar buttons: 10 percentage points over the preset scale. */
+  zoomStep(direction) {
+    const background = this.background;
+    if (!background?.hasImage()) return;
+
+    const target = Math.round(
+      Math.min(
+        ZOOM_MAX,
+        Math.max(ZOOM_MIN, background.zoom + direction * ZOOM_BUTTON_STEP),
+      ) * 100,
+    ) / 100;
+    if (target === background.zoom) return;
+
+    background.zoomBy(target / background.zoom);
+  }
+
+  // ---------------------------------------------------------------------
+  // Reference file upload
+  // ---------------------------------------------------------------------
+
+  async uploadReference(file) {
+    if (!file || !this.background) return;
+
+    this.statusMessage = "Uploading reference…";
+    this.statusIsError = false;
+    this.updateHint();
+
+    const fallbackName = uniqueUploadName(this.node, file.name);
+    const formData = new FormData();
+    formData.append("image", file, fallbackName);
+    formData.append("type", "input");
+    formData.append("overwrite", "true");
+
+    try {
+      const response = await api.fetchApi("/upload/image", {
+        method: "POST",
+        body: formData,
+      });
+      if (!response?.ok) {
+        throw new Error(`upload failed with HTTP ${response?.status ?? "?"}`);
+      }
+
+      const data = await response.json();
+      // The editor may have been removed while the upload was in flight.
+      if (!this.background) return;
+
+      this.background.setFile({
+        filename: data?.name ?? fallbackName,
+        type: data?.type ?? "input",
+        subfolder: data?.subfolder ?? "",
+      });
+      this.background.setMode("reference");
+      this.statusMessage = null;
+      this.statusIsError = false;
+    } catch (error) {
+      if (!this.background) return;
+      console.error(
+        "[LayoutPromptBuilder] reference upload failed:",
+        error,
+      );
+      this.statusMessage =
+        "Reference upload failed — the previous image was kept.";
+      this.statusIsError = true;
+    }
+
+    this.updateToolbar();
+    this.scheduleRender();
+  }
+
+  handleBackgroundChange() {
+    this.updateToolbar();
+    this.scheduleRender();
+  }
+
+  // ---------------------------------------------------------------------
+  // Canvas listeners: hover, wheel, and pan
+  // ---------------------------------------------------------------------
+
+  addCanvasListeners() {
+    const signal = this.abortController.signal;
+    const canvas = this.canvas;
+
+    canvas.addEventListener("pointerenter", () => {
+      this.canvasHovered = true;
+    }, { signal });
+
+    canvas.addEventListener("pointerleave", () => {
+      this.canvasHovered = false;
+      this.updateHover(null);
+    }, { signal });
+
+    canvas.addEventListener("pointermove", (event) => {
+      this.handleHoverMove(event);
+    }, { signal });
+
+    canvas.addEventListener("pointerdown", (event) => {
+      this.handleCanvasPointerDown(event);
+    }, { signal });
+
+    canvas.addEventListener("wheel", (event) => {
+      this.handleWheel(event);
+    }, { signal, passive: false });
+
+    // Middle-click autoscroll belongs to the page, not the reference.
+    canvas.addEventListener("auxclick", (event) => {
+      if (event.button === 1) event.preventDefault();
+    }, { signal });
+
+    window.addEventListener("pointermove", (event) => {
+      this.handlePanMove(event);
+    }, { signal });
+    window.addEventListener("pointerup", (event) => {
+      this.handlePanEnd(event);
+    }, { signal });
+    window.addEventListener("pointercancel", (event) => {
+      this.handlePanEnd(event);
+    }, { signal });
+
+    window.addEventListener("keydown", (event) => {
+      this.handleKeyDown(event);
+    }, { signal });
+    window.addEventListener("keyup", (event) => {
+      this.handleKeyUp(event);
+    }, { signal });
+    window.addEventListener("blur", () => {
+      this.resetTransientInput();
+    }, { signal });
+    window.addEventListener("resize", () => {
+      // A monitor change can alter devicePixelRatio without a node resize.
+      this.refreshCanvasSize();
+      this.scheduleRender();
+    }, { signal });
+  }
+
+  /** Canvas-space scale factors for graph-zoomed DOM widgets. */
+  canvasScale() {
+    const size = this.canvasSize ?? { width: 1, height: 1 };
+    const rect = this.canvas?.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return { x: 1, y: 1 };
+    }
+    return {
+      x: size.width / rect.width,
+      y: size.height / rect.height,
+    };
+  }
+
+  /** Map a pointer/wheel event to canvas CSS pixel coordinates. */
+  canvasPoint(event) {
+    const rect = this.canvas?.getBoundingClientRect?.();
+    if (!rect) return { x: 0, y: 0 };
+    const scale = this.canvasScale();
+    return {
+      x: (event.clientX - rect.left) * scale.x,
+      y: (event.clientY - rect.top) * scale.y,
+    };
+  }
+
+  handleHoverMove(event) {
+    if (!this.canvasView || this.panDrag) return;
+
+    const point = this.canvasPoint(event);
+    const size = this.canvasSize ?? this.computeCanvasSize();
+    const hit = hitTest(
+      this.state.boxes,
+      point.x,
+      point.y,
+      size.width,
+      size.height,
+      HOVER_HANDLE_RADIUS,
+    );
+    this.updateHover(hit?.id ?? null);
+  }
+
+  updateHover(id) {
+    const next = id ?? null;
+    if (next === this.hoverId) return;
+    this.hoverId = next;
+    this.canvasView?.setHover(next);
+    this.scheduleRender();
+  }
+
+  handleWheel(event) {
+    // The editor owns the wheel over the canvas: never let the graph zoom.
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.deltaY === 0 || !this.background?.hasImage()) return;
+
+    const point = this.canvasPoint(event);
+    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.background.zoomBy(factor, point);
+  }
+
+  wantsPan(event) {
+    return (
+      event.button === 1 ||
+      this.moveBackground ||
+      (event.button === 0 && this.spaceHeld)
+    );
+  }
+
+  handleCanvasPointerDown(event) {
+    if (!this.canvas) return;
+    if (event.button !== 0 && event.button !== 1) return;
+
+    this.canvas.focus?.({ preventScroll: true });
+
+    // Task 9 owns left-button draw/select; only pan gestures here.
+    if (!this.wantsPan(event)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    this.panDrag = {
+      pointerId: event.pointerId,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+    };
+    this.canvas.classList.add("lp-canvas-panning");
+  }
+
+  handlePanMove(event) {
+    const drag = this.panDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+
+    const scale = this.canvasScale();
+    const dx = (event.clientX - drag.lastClientX) * scale.x;
+    const dy = (event.clientY - drag.lastClientY) * scale.y;
+    drag.lastClientX = event.clientX;
+    drag.lastClientY = event.clientY;
+
+    if (dx !== 0 || dy !== 0) {
+      this.background?.panBy(dx, dy);
+    }
+  }
+
+  handlePanEnd(event) {
+    const drag = this.panDrag;
+    if (!drag) return;
+    if (event.pointerId !== undefined && event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    this.panDrag = null;
+    this.canvas?.classList.remove("lp-canvas-panning");
+    this.updateCursor();
+  }
+
+  isEditorEngaged() {
+    const active = globalThis.document?.activeElement;
+    if (this.root && active && this.root.contains(active)) return true;
+    return this.canvasHovered;
+  }
+
+  handleKeyDown(event) {
+    if (event.code !== "Space" && event.key !== " ") return;
+    if (isInteractiveTarget(event.target)) return;
+    if (!this.isEditorEngaged()) return;
+
+    this.spaceHeld = true;
+    this.updateCursor();
+    if (!this.panDrag) event.preventDefault();
+  }
+
+  handleKeyUp(event) {
+    if (event.code !== "Space" && event.key !== " ") return;
+    this.spaceHeld = false;
+    this.updateCursor();
+  }
+
+  resetTransientInput() {
+    this.spaceHeld = false;
+    this.panDrag = null;
+    this.canvas?.classList.remove("lp-canvas-panning");
+    this.updateCursor();
+  }
+
+  updateCursor() {
+    if (!this.canvas) return;
+    const panReady = this.moveBackground || this.spaceHeld;
+    this.canvas.classList.toggle("lp-canvas-pan", panReady);
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering / height
+  // ---------------------------------------------------------------------
+
+  scheduleRender() {
+    if (!this.canvasView || this.renderFrame !== null) return;
+
+    this.renderFrame = this.raf(() => {
+      this.renderFrame = null;
+      this.canvasView?.render(this.state, this.background);
+    });
+  }
+
+  cancelScheduledRender() {
+    if (this.renderFrame === null) return;
+    this.caf(this.renderFrame);
+    this.renderFrame = null;
   }
 
   renderState() {
@@ -157,6 +888,169 @@ export class LayoutEditor {
     if (list) list.scrollTop = scrollTop;
     restoreFieldFocus(this.listHost, focus);
   }
+
+  wireOutputWidgets() {
+    for (const name of ["aspect_ratio", "megapixels"]) {
+      const widget = this.node?.widgets?.find(
+        (candidate) => candidate?.name === name,
+      );
+      if (!widget) continue;
+
+      const entry = {
+        widget,
+        original: widget.callback,
+        wrapper: null,
+      };
+      entry.wrapper = (...args) => {
+        const result = entry.original?.apply(widget, args);
+        this.onOutputSettingsChanged();
+        return result;
+      };
+      widget.callback = entry.wrapper;
+      this.widgetWrappers.push(entry);
+    }
+  }
+
+  restoreWidgetCallbacks() {
+    for (const { widget, original, wrapper } of this.widgetWrappers) {
+      if (widget.callback === wrapper) widget.callback = original;
+    }
+    this.widgetWrappers = [];
+  }
+
+  wireNodeResize() {
+    const node = this.node;
+    if (!node) return;
+
+    const previous = node.onResize;
+    const editor = this;
+    const wrapper = function (...args) {
+      previous?.apply(this, args);
+      if (!editor.applyingSize) editor.handleNodeResize(args[0]);
+    };
+
+    node.onResize = wrapper;
+    this.resizeWrapper = { wrapper, previous };
+  }
+
+  restoreNodeResize() {
+    const entry = this.resizeWrapper;
+    this.resizeWrapper = null;
+    if (!entry || !this.node || this.node.onResize !== entry.wrapper) return;
+
+    if (entry.previous === undefined) {
+      try {
+        delete this.node.onResize;
+      } catch {
+        this.node.onResize = undefined;
+      }
+    } else {
+      this.node.onResize = entry.previous;
+    }
+  }
+
+  handleNodeResize(size) {
+    if (!Array.isArray(size)) return;
+
+    // Recompute the canvas first: a width change can change the canvas height
+    // (and therefore the node height required to fit it).
+    this.refreshCanvasSize();
+    const required = this.requiredNodeHeight();
+    const height = size[1];
+    const previousHeight = this.lastNodeHeight;
+
+    if (Number.isFinite(height)) {
+      const heightChanged =
+        !Number.isFinite(previousHeight) ||
+        Math.abs(height - previousHeight) > 0.5;
+
+      if (heightChanged) {
+        // The user changed the node height (usually by dragging the corner):
+        // keep the extra room and stop auto-shrinking.
+        this.userSizedHeight =
+          Number.isFinite(required) &&
+          height > required + HEIGHT_TOLERANCE;
+      } else if (
+        Number.isFinite(required) &&
+        height <= required + HEIGHT_TOLERANCE
+      ) {
+        // A width-only change that now fits exactly clears the flag.
+        this.userSizedHeight = false;
+      }
+
+      this.lastNodeHeight = height;
+    }
+
+    this.requestHeight();
+  }
+
+  observeRootResize(root) {
+    if (typeof ResizeObserver !== "function") return;
+    this.resizeObserver = new ResizeObserver(() => {
+      const width = this.root?.clientWidth ?? 0;
+      if (width <= 0 || width === this.lastRootWidth) return;
+      this.lastRootWidth = width;
+      this.refreshCanvasSize();
+      this.requestHeight();
+    });
+    this.resizeObserver.observe(root);
+  }
+
+  /** Total node height required by the widgets plus the editor panel. */
+  requiredNodeHeight() {
+    if (typeof this.node?.computeSize === "function") {
+      const computed = this.node.computeSize();
+      if (Array.isArray(computed) && Number.isFinite(computed[1])) {
+        return computed[1];
+      }
+    }
+    return this.computeHeight();
+  }
+
+  applyNodeHeight(height) {
+    const node = this.node;
+    if (!node?.setSize || !Array.isArray(node.size)) return;
+
+    this.applyingSize = true;
+    try {
+      node.setSize([node.size[0], Math.round(height)]);
+      this.lastNodeHeight = Array.isArray(node.size)
+        ? node.size[1]
+        : Math.round(height);
+    } finally {
+      this.applyingSize = false;
+    }
+  }
+
+  /**
+   * Grow or shrink the node so the canvas, toolbar, and list fit. A node the
+   * user manually enlarged is only ever grown further.
+   */
+  requestHeight() {
+    const node = this.node;
+    if (!node) return;
+
+    if (Array.isArray(node.size) && typeof node.computeSize === "function") {
+      const required = this.requiredNodeHeight();
+      const height = node.size[1];
+      if (Number.isFinite(required) && Number.isFinite(height)) {
+        if (required > height + HEIGHT_TOLERANCE) {
+          this.applyNodeHeight(required);
+        } else if (
+          required < height - HEIGHT_TOLERANCE &&
+          !this.userSizedHeight
+        ) {
+          this.applyNodeHeight(required);
+        }
+      }
+    }
+
+    node.setDirtyCanvas?.(true, true);
+  }
+
+  // ---------------------------------------------------------------------
+  // State mutation
+  // ---------------------------------------------------------------------
 
   /**
    * Apply a new state and persist it.
@@ -179,6 +1073,7 @@ export class LayoutEditor {
     }
 
     this.requestHeight();
+    this.scheduleRender();
   }
 
   /**
@@ -223,23 +1118,6 @@ export class LayoutEditor {
       this.editTimer = null;
     }
     this.pendingEdit = null;
-  }
-
-  /** Ask the node to grow if the panel no longer fits in its body. */
-  requestHeight() {
-    const node = this.node;
-    if (!node) return;
-
-    if (Array.isArray(node.size) && typeof node.computeSize === "function") {
-      const [width, height] = node.size;
-      const computed = node.computeSize();
-      const required = Array.isArray(computed) ? computed[1] : 0;
-      if (required > height) {
-        node.setSize?.([width, required]);
-      }
-    }
-
-    node.setDirtyCanvas?.(true, true);
   }
 
   updateSelectionClasses() {
