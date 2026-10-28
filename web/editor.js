@@ -799,12 +799,17 @@ export class LayoutEditor {
       // The editor may have been removed while the upload was in flight.
       if (!this.background) return;
 
+      // A pick is a background edit, not a view-only toggle. Snapshots carry
+      // the file/source, so without its own entry a later undo of a layout
+      // edit made before the pick would silently clear the new reference.
+      const before = this.background.toJSON();
       this.background.setFile({
         filename: data?.name ?? fallbackName,
         type: data?.type ?? "input",
         subfolder: data?.subfolder ?? "",
       });
       this.background.setMode("reference");
+      this.commitBackgroundChange(before);
       this.statusMessage = null;
       this.statusIsError = false;
     } catch (error) {
