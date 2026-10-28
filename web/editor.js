@@ -1,20 +1,21 @@
 // DOM shell for the Layout Prompt Builder node.
 //
 // Owns the parsed editor state, the canvas and reference background, and the
-// single-column box list. This task adds the output canvas, selection visuals,
-// the reference layer, and its Fit/Fill/zoom/pan transform. Pointer editing,
-// keyboard editing, and background persistence live in later tasks.
+// single-column box list. The canvas supports selection plus draw/move/resize
+// pointer gestures that commit once on pointer-up. Keyboard editing and
+// background persistence live in later tasks.
 
 import { api } from "../../scripts/api.js";
 
 import { Background, ZOOM_MAX, ZOOM_MIN } from "./background.js";
-import { CanvasView } from "./canvas.js";
-import { hitTest } from "./geometry.js";
+import { CanvasView, paintOrder } from "./canvas.js";
+import { hitTest, normalizeBbox, rectToBbox } from "./geometry.js";
 import {
   captureFieldFocus,
   LABELS,
   renderBoxList,
   restoreFieldFocus,
+  scrollRowIntoView,
   updateRowSelection,
 } from "./list.js";
 import { computeSize } from "./size.js";
@@ -59,6 +60,11 @@ const DEFAULT_ASPECT_RATIO = "1:1 (Square)";
 const DEFAULT_MEGAPIXELS = 1;
 const ZOOM_BUTTON_STEP = 0.1;
 const HOVER_HANDLE_RADIUS = 6;
+// A left-drag shorter than this is a click (empty canvas: deselect).
+const DRAW_THRESHOLD_PX = 3;
+// Smallest box a draw or resize may produce, in display pixels.
+const MIN_BOX_SIZE_PX = 3;
+const BBOX_MAX = 1000;
 // A node that is taller than the panel by more than this is treated as a
 // manual enlargement and is never auto-shrunk.
 const HEIGHT_TOLERANCE = 1;
@@ -116,6 +122,92 @@ function setPressed(button, pressed) {
   button.setAttribute("aria-pressed", pressed ? "true" : "false");
 }
 
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+/** Compare two normalized yxyx bboxes. */
+function sameBbox(a, b) {
+  return (
+    Array.isArray(a) &&
+    Array.isArray(b) &&
+    a.length === 4 &&
+    b.length === 4 &&
+    a.every((value, index) => value === b[index])
+  );
+}
+
+/** Minimum bbox extent, in 0-1000 units, for a 3 display-pixel box. */
+function minExtent(size) {
+  return Math.ceil((MIN_BOX_SIZE_PX * BBOX_MAX) / Math.max(1, size));
+}
+
+/** Grow one axis of a bbox to the minimum extent, keeping it inside 0-1000. */
+function withMinExtent(low, high, minimum) {
+  if (high - low >= minimum) return [low, high];
+  if (low + minimum <= BBOX_MAX) return [low, low + minimum];
+  return [Math.max(0, high - minimum), high];
+}
+
+/** Bbox for a draw gesture: clamped to the canvas with a 3 px minimum. */
+function drawBbox(start, end, canvasW, canvasH) {
+  const x = Math.min(start.x, end.x);
+  const y = Math.min(start.y, end.y);
+  const width = Math.abs(end.x - start.x);
+  const height = Math.abs(end.y - start.y);
+
+  let [y0, x0, y1, x1] = rectToBbox(x, y, width, height, canvasW, canvasH);
+  [x0, x1] = withMinExtent(x0, x1, minExtent(canvasW));
+  [y0, y1] = withMinExtent(y0, y1, minExtent(canvasH));
+  return normalizeBbox([y0, x0, y1, x1]);
+}
+
+/** Translate a bbox by a delta, keeping its size and clamping it on-canvas. */
+function moveBbox(bbox, dx, dy) {
+  const [y0, x0, y1, x1] = normalizeBbox(bbox);
+  const width = x1 - x0;
+  const height = y1 - y0;
+  const nextX = Math.round(clampNumber(x0 + dx, 0, BBOX_MAX - width));
+  const nextY = Math.round(clampNumber(y0 + dy, 0, BBOX_MAX - height));
+  return normalizeBbox([nextY, nextX, nextY + height, nextX + width]);
+}
+
+/**
+ * Resize a bbox from one of the 8 handle parts (tl, tc, tr, ml, mr, bl, bc,
+ * br), clamping to 0-1000 and enforcing the 3 display-pixel minimum.
+ */
+function resizeBbox(bbox, part, dx, dy, canvasW, canvasH) {
+  let [y0, x0, y1, x1] = normalizeBbox(bbox);
+  const minimumWidth = minExtent(canvasW);
+  const minimumHeight = minExtent(canvasH);
+
+  if (part.includes("t")) {
+    y0 = clampNumber(y0 + dy, 0, Math.max(0, y1 - minimumHeight));
+  }
+  if (part.includes("b")) {
+    y1 = clampNumber(
+      y1 + dy,
+      Math.min(BBOX_MAX, y0 + minimumHeight),
+      BBOX_MAX,
+    );
+  }
+  if (part.includes("l")) {
+    x0 = clampNumber(x0 + dx, 0, Math.max(0, x1 - minimumWidth));
+  }
+  if (part.includes("r")) {
+    x1 = clampNumber(
+      x1 + dx,
+      Math.min(BBOX_MAX, x0 + minimumWidth),
+      BBOX_MAX,
+    );
+  }
+
+  const next = normalizeBbox([y0, x0, y1, x1]);
+  [next[0], next[2]] = withMinExtent(next[0], next[2], minimumHeight);
+  [next[1], next[3]] = withMinExtent(next[1], next[3], minimumWidth);
+  return normalizeBbox(next);
+}
+
 export class LayoutEditor {
   /**
    * @param {object} node ComfyUI node instance
@@ -150,6 +242,7 @@ export class LayoutEditor {
     this.spaceHeld = false;
     this.canvasHovered = false;
     this.panDrag = null;
+    this.boxDrag = null;
 
     this.renderFrame = null;
     this.resizeObserver = null;
@@ -315,6 +408,7 @@ export class LayoutEditor {
     this.moveButton = null;
     this.fileInput = null;
     this.panDrag = null;
+    this.boxDrag = null;
     this.renderFrame = null;
   }
 
@@ -690,6 +784,17 @@ export class LayoutEditor {
       this.handlePanEnd(event);
     }, { signal });
 
+    // Window-level listeners keep a box gesture alive outside the canvas.
+    window.addEventListener("pointermove", (event) => {
+      this.handleBoxMove(event);
+    }, { signal });
+    window.addEventListener("pointerup", (event) => {
+      this.handleBoxEnd(event);
+    }, { signal });
+    window.addEventListener("pointercancel", (event) => {
+      this.handleBoxCancel(event);
+    }, { signal });
+
     window.addEventListener("keydown", (event) => {
       this.handleKeyDown(event);
     }, { signal });
@@ -731,19 +836,49 @@ export class LayoutEditor {
   }
 
   handleHoverMove(event) {
-    if (!this.canvasView || this.panDrag) return;
+    if (!this.canvasView || this.panDrag || this.boxDrag) return;
 
     const point = this.canvasPoint(event);
     const size = this.canvasSize ?? this.computeCanvasSize();
-    const hit = hitTest(
-      this.state.boxes,
-      point.x,
-      point.y,
-      size.width,
-      size.height,
-      HOVER_HANDLE_RADIUS,
-    );
+    const hit = this.hitTestCanvas(point.x, point.y, size);
     this.updateHover(hit?.id ?? null);
+  }
+
+  /**
+   * Hit-test in paint order: the selected box is painted last, so it must also
+   * win the hit test over an unselected box underneath it.
+   * @param {number} px canvas CSS pixels
+   * @param {number} py canvas CSS pixels
+   * @param {{width: number, height: number}} size
+   * @param {number} [radius]
+   * @returns {{id: string, part: string} | null}
+   */
+  hitTestCanvas(px, py, size, radius = HOVER_HANDLE_RADIUS) {
+    const ordered = paintOrder(this.state.boxes, this.state.selectedId);
+    return hitTest(ordered, px, py, size.width, size.height, radius);
+  }
+
+  findBox(id) {
+    return this.state.boxes.find((box) => box.id === id) ?? null;
+  }
+
+  /**
+   * Select a box from a canvas gesture. Quiet: the list keeps its rows and
+   * only the selected row scrolls into view.
+   * @param {string | null} id
+   */
+  applyCanvasSelection(id) {
+    if (id !== null && !this.hasBox(id)) return;
+
+    if (this.state.selectedId === id) {
+      if (id !== null) scrollRowIntoView(this.listHost, id);
+      return;
+    }
+
+    this.state = { ...this.state, selectedId: id };
+    this.updateSelectionClasses();
+    if (id !== null) scrollRowIntoView(this.listHost, id);
+    this.scheduleRender();
   }
 
   updateHover(id) {
@@ -777,21 +912,182 @@ export class LayoutEditor {
   handleCanvasPointerDown(event) {
     if (!this.canvas) return;
     if (event.button !== 0 && event.button !== 1) return;
+    if (this.panDrag || this.boxDrag) return;
 
     this.canvas.focus?.({ preventScroll: true });
 
-    // Task 9 owns left-button draw/select; only pan gestures here.
-    if (!this.wantsPan(event)) return;
+    // Move bg, Space+drag, and middle-drag pan before box editing sees the
+    // press; a plain left-press over a box must still select it.
+    if (this.wantsPan(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      this.panDrag = {
+        pointerId: event.pointerId,
+        lastClientX: event.clientX,
+        lastClientY: event.clientY,
+      };
+      this.canvas.classList.add("lp-canvas-panning");
+      return;
+    }
+
+    if (event.button !== 0) return;
 
     event.preventDefault();
     event.stopPropagation();
+    this.flushPendingEdit();
 
-    this.panDrag = {
+    const point = this.canvasPoint(event);
+    const size = this.canvasSize ?? this.computeCanvasSize();
+    const hit = this.hitTestCanvas(point.x, point.y, size);
+
+    if (!hit) {
+      // Empty press: a click (<3 px) deselects, a drag draws a new box.
+      this.applyCanvasSelection(null);
+      this.boxDrag = {
+        kind: "draw",
+        id: null,
+        part: null,
+        startPx: point,
+        startBox: null,
+        baseState: this.state,
+        pointerId: event.pointerId,
+        previewId: null,
+      };
+      this.updateHover(null);
+      return;
+    }
+
+    const wasSelected = hit.id === this.state.selectedId;
+    this.applyCanvasSelection(hit.id);
+    const box = this.findBox(hit.id);
+    if (!box) return;
+
+    // Only the selected box's handles resize; the handle of an unselected box
+    // selects that box and behaves like a move.
+    const resizing = wasSelected && hit.part !== "move";
+    this.boxDrag = {
+      kind: resizing ? "resize" : "move",
+      id: hit.id,
+      part: resizing ? hit.part : null,
+      startPx: point,
+      startBox: { ...box, bbox: [...box.bbox] },
+      baseState: this.state,
       pointerId: event.pointerId,
-      lastClientX: event.clientX,
-      lastClientY: event.clientY,
+      previewId: null,
     };
-    this.canvas.classList.add("lp-canvas-panning");
+    this.updateHover(null);
+  }
+
+  handleBoxMove(event) {
+    const drag = this.boxDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    this.applyDragPoint(this.canvasPoint(event));
+  }
+
+  /**
+   * Recompute the transient state for the active gesture. Nothing is persisted
+   * here; the pointer-up handler commits exactly once.
+   * @param {{x: number, y: number}} point canvas CSS pixels
+   * @returns {boolean} whether the transient state changed
+   */
+  applyDragPoint(point) {
+    const drag = this.boxDrag;
+    if (!drag) return false;
+
+    const size = this.canvasSize ?? this.computeCanvasSize();
+    if (!(size.width > 0) || !(size.height > 0)) return false;
+
+    if (drag.kind === "draw") {
+      const movedX = Math.abs(point.x - drag.startPx.x);
+      const movedY = Math.abs(point.y - drag.startPx.y);
+      if (
+        drag.previewId === null &&
+        Math.max(movedX, movedY) < DRAW_THRESHOLD_PX
+      ) {
+        return false;
+      }
+
+      const bbox = drawBbox(drag.startPx, point, size.width, size.height);
+      if (drag.previewId === null) {
+        // A drag creates and selects the new box, appended at the end.
+        drag.previewId = this.newBoxId();
+        this.state = addBox(
+          this.state,
+          createBox(drag.previewId, bbox, { label: DEFAULT_BOX_LABEL }),
+        );
+      } else {
+        const preview = this.findBox(drag.previewId);
+        if (preview && sameBbox(preview.bbox, bbox)) return false;
+        this.state = updateBox(this.state, drag.previewId, { bbox });
+      }
+      this.scheduleRender();
+      return true;
+    }
+
+    const box = this.findBox(drag.id);
+    if (!box) return false;
+
+    const dx = ((point.x - drag.startPx.x) * BBOX_MAX) / size.width;
+    const dy = ((point.y - drag.startPx.y) * BBOX_MAX) / size.height;
+    const bbox =
+      drag.kind === "move"
+        ? moveBbox(drag.startBox.bbox, dx, dy)
+        : resizeBbox(
+            drag.startBox.bbox,
+            drag.part,
+            dx,
+            dy,
+            size.width,
+            size.height,
+          );
+
+    if (sameBbox(box.bbox, bbox)) return false;
+    this.state = updateBox(this.state, drag.id, { bbox });
+    this.scheduleRender();
+    return true;
+  }
+
+  handleBoxEnd(event) {
+    const drag = this.boxDrag;
+    if (!drag) return;
+    if (event.pointerId !== undefined && event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    // Apply the release point too, so a synthetic up without a final move
+    // still lands on the cursor.
+    this.applyDragPoint(this.canvasPoint(event));
+
+    const changed =
+      drag.kind === "draw"
+        ? drag.previewId !== null
+        : !sameBbox(this.findBox(drag.id)?.bbox, drag.startBox.bbox);
+
+    this.boxDrag = null;
+    if (!changed) {
+      // A plain click: selection was applied on pointer-down.
+      this.scheduleRender();
+      return;
+    }
+
+    // One commit per gesture: hidden widget, list, and height.
+    this.applyState(this.state, { rebuild: true });
+    scrollRowIntoView(this.listHost, this.state.selectedId);
+  }
+
+  handleBoxCancel(event) {
+    const drag = this.boxDrag;
+    if (!drag) return;
+    if (event.pointerId !== undefined && event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    // Revert the transient box and any geometry changes.
+    this.boxDrag = null;
+    this.state = drag.baseState;
+    this.updateSelectionClasses();
+    this.scheduleRender();
   }
 
   handlePanMove(event) {
@@ -846,6 +1142,15 @@ export class LayoutEditor {
   resetTransientInput() {
     this.spaceHeld = false;
     this.panDrag = null;
+
+    if (this.boxDrag) {
+      // Never leave a half-finished, uncommitted box behind.
+      this.state = this.boxDrag.baseState;
+      this.boxDrag = null;
+      this.updateSelectionClasses();
+      this.scheduleRender();
+    }
+
     this.canvas?.classList.remove("lp-canvas-panning");
     this.updateCursor();
   }

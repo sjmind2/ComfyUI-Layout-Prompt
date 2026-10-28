@@ -224,6 +224,26 @@ export function updateRowSelection(container, selectedId) {
 }
 
 /**
+ * Scroll the row for a box into view. Used when selection comes from the
+ * canvas rather than the list.
+ * @param {HTMLElement} container
+ * @param {string | null} selectedId
+ * @returns {void}
+ */
+export function scrollRowIntoView(container, selectedId) {
+  if (!container || !selectedId) return;
+
+  const row = [...container.querySelectorAll(".lp-row")].find(
+    (candidate) => candidate.dataset.id === selectedId,
+  );
+  if (!row) return;
+
+  // "nearest" leaves an already-visible row alone and only scrolls when the
+  // selected row is outside the five-row viewport.
+  row.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+}
+
+/**
  * Capture the field focus and text selection before a re-render.
  * @param {HTMLElement} host
  * @returns {{id: string, fieldClass: string, start: number | null,

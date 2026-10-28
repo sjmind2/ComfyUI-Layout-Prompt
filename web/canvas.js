@@ -56,6 +56,21 @@ function boxColor(box) {
 }
 
 /**
+ * Boxes in paint order: every unselected box in list order, then the selected
+ * box last so overlaps never hide it. Hit-testing must use the same order so
+ * pointer-down agrees with what the user sees.
+ * @param {object[]} boxes
+ * @param {string | null} selectedId
+ * @returns {object[]}
+ */
+export function paintOrder(boxes, selectedId) {
+  const list = Array.isArray(boxes) ? boxes : [];
+  const selected = list.find((box) => box.id === selectedId) ?? null;
+  if (!selected) return [...list];
+  return [...list.filter((box) => box !== selected), selected];
+}
+
+/**
  * Canvas view layer. The editor owns state and scheduling; this class only
  * resizes the backing store and paints one frame.
  */
@@ -145,19 +160,12 @@ export class CanvasView {
     const selectedId = state?.selectedId ?? null;
     const selected = boxes.find((box) => box.id === selectedId) ?? null;
 
-    for (const box of boxes) {
-      if (box === selected) continue;
-      this.drawBox(ctx, box, width, height, {
-        hovered: box.id === this.hoverId,
-        selected: false,
-      });
-    }
-
     // The selection is always the topmost box, regardless of list order.
-    if (selected) {
-      this.drawBox(ctx, selected, width, height, {
-        hovered: false,
-        selected: true,
+    for (const box of paintOrder(boxes, selectedId)) {
+      const isSelected = box === selected;
+      this.drawBox(ctx, box, width, height, {
+        hovered: !isSelected && box.id === this.hoverId,
+        selected: isSelected,
       });
     }
 
