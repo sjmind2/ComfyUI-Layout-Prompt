@@ -76,6 +76,9 @@ const HEIGHT_TOLERANCE = 1;
 
 // Typing commits after this pause; blur flushes immediately.
 const FIELD_DEBOUNCE_MS = 150;
+// Background properties are written at most this long after the last change;
+// pointer-driven pan updates therefore persist once the gesture settles.
+const PERSIST_DEBOUNCE_MS = 100;
 
 // Undo/redo depth for layout and reference-transform snapshots.
 const HISTORY_LIMIT = 50;
@@ -132,6 +135,26 @@ function sameRef(a, b) {
     a.filename === b.filename &&
     a.type === b.type &&
     a.subfolder === b.subfolder
+  );
+}
+
+/**
+ * Compare two Background.toJSON() snapshots ignoring the view-only
+ * White/Reference mode. Used to decide whether a source switch is an edit
+ * worth an undo entry: toggling the mode alone never is.
+ * @returns {boolean}
+ */
+function sameBackgroundContent(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.source === b.source &&
+    a.fit === b.fit &&
+    a.zoom === b.zoom &&
+    a.panX === b.panX &&
+    a.panY === b.panY &&
+    sameRef(a.file, b.file) &&
+    sameRef(a.last, b.last)
   );
 }
 
@@ -287,7 +310,20 @@ export class LayoutEditor {
     this.zoomLabel = null;
     this.moveButton = null;
     this.fileInput = null;
+    this.lastButton = null;
+    this.sourceBadge = null;
     this.hintElement = null;
+
+    // Newest image reported by the global "executed" listener. Offered to the
+    // "Last" button; it never switches the displayed reference by itself.
+    this.lastOutput = null;
+    // Identifies the in-flight "Use last output" request so a superseded
+    // load can neither commit nor revert a newer user action.
+    this.lastRequest = 0;
+    // Deferred write of background.toJSON() into node.properties.
+    this.persistTimer = null;
+    // Optional teardown hook (the extension unregisters the editor here).
+    this.onDestroy = null;
 
     this.statusMessage = null;
     this.statusIsError = false;
@@ -442,6 +478,19 @@ export class LayoutEditor {
     // must not be undoable into this one.
     this.history = createHistory(HISTORY_LIMIT);
     this.state = deserializeState(this.hiddenWidget?.value ?? "");
+
+    // A load that was still in flight belongs to the previous document.
+    this.lastRequest += 1;
+
+    // Background state saved with the workflow. This is a load, not an edit:
+    // it must never push an undo entry. A missing/unloadable file keeps the
+    // stored descriptor and lets the canvas fall back to white.
+    this.cancelPersistBackground();
+    const storedBackground = this.node?.properties?.layoutPromptBg;
+    if (storedBackground && this.background) {
+      this.background.loadStored(storedBackground);
+    }
+
     this.refreshCanvasSize();
     this.renderState();
     this.updateToolbar();
@@ -462,6 +511,7 @@ export class LayoutEditor {
 
     this.restoreWidgetCallbacks();
     this.restoreNodeResize();
+    this.cancelPersistBackground();
 
     if (this.background) this.background.onChange = null;
 
@@ -482,9 +532,16 @@ export class LayoutEditor {
     this.zoomLabel = null;
     this.moveButton = null;
     this.fileInput = null;
+    this.lastButton = null;
+    this.sourceBadge = null;
+    this.lastOutput = null;
     this.panDrag = null;
     this.boxDrag = null;
     this.renderFrame = null;
+
+    const onDestroy = this.onDestroy;
+    this.onDestroy = null;
+    onDestroy?.();
   }
 
   // ---------------------------------------------------------------------
@@ -633,6 +690,21 @@ export class LayoutEditor {
       () => fileInput.click(),
     );
 
+    const lastButton = this.createToolButton(
+      "Last",
+      "No output image yet — run the workflow to generate one",
+      () => {
+        void this.useLastOutput();
+      },
+    );
+
+    // The badge names the displayed source ("file" or "last") without taking
+    // much toolbar room. Styling is inherited from .lp-zoom.
+    const sourceBadge = document.createElement("span");
+    sourceBadge.className = "lp-zoom lp-source-badge";
+    sourceBadge.style.minWidth = "0";
+    sourceBadge.setAttribute("aria-label", "Reference source");
+
     const fitGroup = document.createElement("div");
     fitGroup.className = "lp-segment";
     fitGroup.setAttribute("role", "group");
@@ -677,6 +749,8 @@ export class LayoutEditor {
     toolbar.append(
       modeGroup,
       pickButton,
+      lastButton,
+      sourceBadge,
       fitGroup,
       zoomOut,
       zoomLabel,
@@ -690,6 +764,8 @@ export class LayoutEditor {
     this.zoomLabel = zoomLabel;
     this.moveButton = moveButton;
     this.fileInput = fileInput;
+    this.lastButton = lastButton;
+    this.sourceBadge = sourceBadge;
 
     return toolbar;
   }
@@ -711,7 +787,53 @@ export class LayoutEditor {
       }
     }
 
+    this.updateLastControls(background);
     this.updateHint();
+  }
+
+  /** The newest executed image available to the "Last" button, if any. */
+  availableLastRef() {
+    return this.lastOutput ?? this.background?.last ?? null;
+  }
+
+  /**
+   * Keep the "Last" button's enabled state and the source badge in sync with
+   * the background. The badge names the reference currently displayed
+   * ("file" or "last"), not merely the stored source.
+   * @param {import("./background.js").Background} background
+   */
+  updateLastControls(background) {
+    if (this.lastButton) {
+      const lastRef = this.availableLastRef();
+      this.lastButton.disabled = !lastRef;
+      this.lastButton.style.opacity = lastRef ? "" : "0.4";
+      const title = lastRef
+        ? "Use last output as the reference"
+        : "No output image yet — run the workflow to generate one";
+      if (this.lastButton.title !== title) {
+        this.lastButton.title = title;
+        this.lastButton.setAttribute("aria-label", title);
+      }
+    }
+
+    if (this.sourceBadge) {
+      let text = "";
+      let title = "No reference selected";
+      if (background.source === "last" && background.last) {
+        text = "last";
+        title = `Reference source: last output (${background.last.filename})`;
+      } else if (background.file) {
+        text = "file";
+        title = `Reference source: file (${background.file.filename})`;
+      }
+
+      if (this.sourceBadge.textContent !== text) {
+        this.sourceBadge.textContent = text;
+      }
+      this.sourceBadge.title = title;
+      this.sourceBadge.setAttribute("aria-label", title);
+      this.sourceBadge.hidden = text === "";
+    }
   }
 
   updateHint() {
@@ -731,7 +853,7 @@ export class LayoutEditor {
     } else if (background?.loading) {
       message = "Loading reference…";
     } else if (background?.mode === "reference" && !background.hasImage()) {
-      message = "No reference yet — use Pick file.";
+      message = "No reference yet — use Pick file or Last.";
     }
 
     if (this.hintElement.textContent !== message) {
@@ -767,6 +889,77 @@ export class LayoutEditor {
     const before = background.toJSON();
     background.setFit(fit);
     this.commitBackgroundChange(before);
+  }
+
+  // ---------------------------------------------------------------------
+  // Last output
+  // ---------------------------------------------------------------------
+
+  /**
+   * Offer a newly executed output image to the "Last" button. The displayed
+   * reference is deliberately left alone; the user must click the button.
+   * @param {{filename?: string, type?: string, subfolder?: string} | null} ref
+   */
+  setLastOutput(ref) {
+    if (!this.background) return;
+    if (!ref || typeof ref.filename !== "string" || !ref.filename) return;
+
+    this.lastOutput = {
+      filename: ref.filename,
+      type: typeof ref.type === "string" && ref.type ? ref.type : "temp",
+      subfolder: typeof ref.subfolder === "string" ? ref.subfolder : "",
+    };
+    this.updateToolbar();
+  }
+
+  /**
+   * Load the newest executed image as the reference. A success is a
+   * source-changing background edit, so it is undoable exactly like Pick
+   * file; a failed load keeps the previous reference and pushes nothing.
+   * @returns {Promise<void>}
+   */
+  async useLastOutput() {
+    const background = this.background;
+    if (!background) return;
+
+    const ref = this.availableLastRef();
+    if (!ref) return;
+
+    const request = (this.lastRequest += 1);
+    const before = background.toJSON();
+    const pending = background.setLast(ref);
+    const requested = background.last;
+    const loaded = await pending;
+
+    // The editor or a newer request may have won while the image decoded.
+    if (this.background !== background || this.lastRequest !== request) return;
+
+    if (!loaded) {
+      const current = background.toJSON();
+      const stillOurs =
+        current.source === "last" && sameRef(current.last, requested);
+      // A superseding action (another source/load) already owns the state.
+      if (!stillOurs) return;
+
+      // Not an edit: restore the previous reference and record no history.
+      background.loadStored(before);
+      this.statusMessage =
+        "Last output unavailable — the previous image was kept.";
+      this.statusIsError = true;
+      this.updateToolbar();
+      this.scheduleRender();
+      return;
+    }
+
+    // The source switch is what users expect to undo. Reloading the same
+    // source while only the view-only mode changed is not an edit.
+    if (!sameBackgroundContent(before, background.toJSON())) {
+      this.commitBackgroundChange(before);
+    }
+    this.statusMessage = null;
+    this.statusIsError = false;
+    this.updateToolbar();
+    this.scheduleRender();
   }
 
   // ---------------------------------------------------------------------
@@ -830,6 +1023,42 @@ export class LayoutEditor {
   handleBackgroundChange() {
     this.updateToolbar();
     this.scheduleRender();
+    // Committed edits also persist immediately; this deferred write covers
+    // mode toggles, asynchronous loads, undo/redo restores, and drag updates
+    // (so a pan gesture never writes on every pointer move).
+    this.schedulePersistBackground();
+  }
+
+  // ---------------------------------------------------------------------
+  // Background persistence
+  // ---------------------------------------------------------------------
+
+  /** Write the current background snapshot into node.properties now. */
+  persistBackground() {
+    this.cancelPersistBackground();
+    const properties = this.node?.properties;
+    if (!properties || !this.background) return;
+    properties.layoutPromptBg = this.background.toJSON();
+  }
+
+  /** Persist after a short idle window; bursts collapse into one write. */
+  schedulePersistBackground() {
+    if (!this.background || !this.node?.properties) return;
+    if (this.persistTimer !== null) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      const properties = this.node?.properties;
+      if (!properties || !this.background) return;
+      properties.layoutPromptBg = this.background.toJSON();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  /** Drop a deferred write (configure / destroy). */
+  cancelPersistBackground() {
+    if (this.persistTimer !== null) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1242,6 +1471,7 @@ export class LayoutEditor {
     const after = this.background?.toJSON() ?? null;
     if (sameBackground(base.background, after)) return;
     this.pushSnapshot(base);
+    this.persistBackground();
   }
 
   isEditorEngaged() {
@@ -1520,17 +1750,17 @@ export class LayoutEditor {
     if (!coalesce) {
       this.endHistoryGroups();
       this.pushSnapshot({ layout: this.state, background: before });
-      return true;
+    } else {
+      // One entry per wheel burst: the first notch stores the pre-burst
+      // transform, later notches only keep the burst alive.
+      this.endNudgeGroup();
+      if (!this.zoomBurstActive) {
+        this.zoomBurstActive = true;
+        this.pushSnapshot({ layout: this.state, background: before });
+      }
+      this.armZoomBurst();
     }
-
-    // One entry per wheel burst: the first notch stores the pre-burst
-    // transform, later notches only keep the burst alive.
-    this.endNudgeGroup();
-    if (!this.zoomBurstActive) {
-      this.zoomBurstActive = true;
-      this.pushSnapshot({ layout: this.state, background: before });
-    }
-    this.armZoomBurst();
+    this.persistBackground();
     return true;
   }
 

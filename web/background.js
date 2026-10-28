@@ -291,6 +291,39 @@ export class Background {
   }
 
   /**
+   * Use a last-output image: store it as `last`, switch the source to "last",
+   * show Reference mode, reset the transform, and load it. The caller owns
+   * history/persistence decisions; this method only reports whether the image
+   * actually decoded so a failed load can be left out of undo history.
+   * @param {string | {filename?: string, name?: string, type?: string,
+   *                  subfolder?: string} | null} ref
+   * @returns {Promise<boolean>} true when the image decoded; false when the
+   *   reference was invalid, the load failed, or a newer load superseded it
+   */
+  setLast(ref) {
+    const normalized = normalizeRef(ref);
+    if (!normalized) return Promise.resolve(false);
+
+    this.last = normalized;
+    this.source = "last";
+    this.mode = "reference";
+    this.error = null;
+    this.image = null;
+    this.imageWidth = 0;
+    this.imageHeight = 0;
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.loading = false;
+
+    const loaded = this._loadRef(normalized);
+    // Reflect Reference mode and the loading hint right away; loads also
+    // notify when they finish.
+    this._notify();
+    return loaded;
+  }
+
+  /**
    * Restore a background snapshot (persistence hook used by Task 11). Accepts
    * `{mode, source, file, last, fit, zoom, panX, panY}` and loads `file`
    * without disturbing the restored transform.
@@ -323,9 +356,11 @@ export class Background {
     this.imageHeight = 0;
     this.loadToken += 1;
     this.loading = false;
+    // A restored snapshot with no usable reference is simply white, not an
+    // error left over from a previous load.
+    this.error = null;
 
     if (loadRef) {
-      this.error = null;
       this._loadRef(loadRef);
       return;
     }
@@ -354,44 +389,69 @@ export class Background {
     };
   }
 
-  /** @private */
+  /**
+   * @private
+   * @param {{filename: string, type: string, subfolder: string}} ref
+   * @returns {Promise<boolean>} true when this load decoded an image; false
+   *   when it failed or a newer load superseded it. Never rejects.
+   */
   _loadRef(ref) {
     const token = (this.loadToken += 1);
     this.loading = true;
     this.error = null;
 
-    const image = new Image();
-    image.onload = () => {
-      if (token !== this.loadToken) return;
-      this.loading = false;
-      this.image = image;
-      this.imageWidth = image.naturalWidth || image.width || 0;
-      this.imageHeight = image.naturalHeight || image.height || 0;
-      if (!this.hasImage()) {
-        this.image = null;
-        this.error = "reference unavailable";
-      }
-      this._clampPan();
-      this._notify();
-    };
-    image.onerror = () => {
-      if (token !== this.loadToken) return;
-      this.loading = false;
-      this.image = null;
-      this.imageWidth = 0;
-      this.imageHeight = 0;
-      this.error = "reference unavailable";
-      this._clampPan();
-      this._notify();
-    };
-
-    try {
-      image.src = viewURL(ref);
-    } catch (error) {
+    if (typeof Image !== "function") {
       this.loading = false;
       this.error = "reference unavailable";
       this._notify();
+      return Promise.resolve(false);
     }
+
+    return new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => {
+        if (token !== this.loadToken) {
+          resolve(false);
+          return;
+        }
+        this.loading = false;
+        this.image = image;
+        this.imageWidth = image.naturalWidth || image.width || 0;
+        this.imageHeight = image.naturalHeight || image.height || 0;
+        if (!this.hasImage()) {
+          this.image = null;
+          this.error = "reference unavailable";
+        }
+        this._clampPan();
+        this._notify();
+        resolve(this.hasImage());
+      };
+      image.onerror = () => {
+        if (token !== this.loadToken) {
+          resolve(false);
+          return;
+        }
+        this.loading = false;
+        this.image = null;
+        this.imageWidth = 0;
+        this.imageHeight = 0;
+        this.error = "reference unavailable";
+        this._clampPan();
+        this._notify();
+        resolve(false);
+      };
+
+      try {
+        image.src = viewURL(ref);
+      } catch (error) {
+        if (token === this.loadToken) {
+          this.loading = false;
+          this.error = "reference unavailable";
+          this._notify();
+        }
+        resolve(false);
+      }
+    });
   }
 
   /** @private Clamp pan so the image keeps the canvas covered or contained. */
