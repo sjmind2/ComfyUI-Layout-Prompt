@@ -96,10 +96,17 @@ export class CanvasView {
   resize(canvasW, canvasH, dpr = null) {
     const width = Math.max(1, Math.round(canvasW));
     const height = Math.max(1, Math.round(canvasH));
+    // Never let the ratio be boolean false or 0 (window.devicePixelRatio can
+    // be 0 in some embedded/webview environments): a zero scale would blur or
+    // blank the backing store.
+    const fallbackRatio =
+      typeof window !== "undefined" ? window.devicePixelRatio : 1;
     const pixelRatio =
-      dpr ??
-      (typeof window !== "undefined" && window.devicePixelRatio) ??
-      1;
+      typeof dpr === "number" && Number.isFinite(dpr) && dpr > 0
+        ? dpr
+        : Number.isFinite(fallbackRatio) && fallbackRatio > 0
+          ? fallbackRatio
+          : 1;
 
     if (
       this.resized &&

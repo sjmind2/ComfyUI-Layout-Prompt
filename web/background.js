@@ -96,6 +96,10 @@ export class Background {
     this.source = "file";
     this.error = null;
     this.loading = false;
+    // True after a load failed to decode. While a stored reference exists but
+    // cannot be decoded, the restored pan is kept (not zeroed) so a later
+    // restore/reflow can still use it.
+    this.decodeFailed = false;
     this.loadToken = 0;
   }
 
@@ -267,11 +271,14 @@ export class Background {
    * reaches this method, so the previous reference is kept in that case.)
    * @param {string | {filename?: string, name?: string, type?: string,
    *                  subfolder?: string}} file
+   * @returns {Promise<boolean>} true when the image decoded; false when the
+   *   reference was invalid, the load failed, or a newer load superseded it
    */
   setFile(file) {
     this.file = normalizeRef(file);
     this.source = "file";
     this.error = null;
+    this.decodeFailed = false;
     this.image = null;
     this.imageWidth = 0;
     this.imageHeight = 0;
@@ -283,11 +290,12 @@ export class Background {
 
     if (!this.file) {
       this.error = "reference unavailable";
+      this.decodeFailed = true;
       this._notify();
-      return;
+      return Promise.resolve(false);
     }
 
-    this._loadRef(this.file);
+    return this._loadRef(this.file);
   }
 
   /**
@@ -308,6 +316,7 @@ export class Background {
     this.source = "last";
     this.mode = "reference";
     this.error = null;
+    this.decodeFailed = false;
     this.image = null;
     this.imageWidth = 0;
     this.imageHeight = 0;
@@ -356,6 +365,7 @@ export class Background {
     this.imageHeight = 0;
     this.loadToken += 1;
     this.loading = false;
+    this.decodeFailed = false;
     // A restored snapshot with no usable reference is simply white, not an
     // error left over from a previous load.
     this.error = null;
@@ -399,10 +409,12 @@ export class Background {
     const token = (this.loadToken += 1);
     this.loading = true;
     this.error = null;
+    this.decodeFailed = false;
 
     if (typeof Image !== "function") {
       this.loading = false;
       this.error = "reference unavailable";
+      this.decodeFailed = true;
       this._notify();
       return Promise.resolve(false);
     }
@@ -422,6 +434,7 @@ export class Background {
           this.image = null;
           this.error = "reference unavailable";
         }
+        this.decodeFailed = !this.hasImage();
         this._clampPan();
         this._notify();
         resolve(this.hasImage());
@@ -436,6 +449,7 @@ export class Background {
         this.imageWidth = 0;
         this.imageHeight = 0;
         this.error = "reference unavailable";
+        this.decodeFailed = true;
         this._clampPan();
         this._notify();
         resolve(false);
@@ -447,6 +461,7 @@ export class Background {
         if (token === this.loadToken) {
           this.loading = false;
           this.error = "reference unavailable";
+          this.decodeFailed = true;
           this._notify();
         }
         resolve(false);
@@ -459,9 +474,11 @@ export class Background {
     if (!this.hasImage()) {
       // While a reference is still decoding there is no scale to clamp
       // against. Keep the restored pan so the completed image can use it;
-      // a reflow during an upload/Last/restore load must not wipe it. Once
-      // the load fails (loading = false) the pan is reset below.
-      if (!this.loading) {
+      // a reflow during an upload/Last/restore load must not wipe it. Keep it
+      // too when a stored descriptor failed to decode, so the pan survives
+      // for a later restore instead of being persisted as zero. Only a
+      // genuinely empty, idle reference is zeroed.
+      if (!this.loading && !this.decodeFailed) {
         this.panX = 0;
         this.panY = 0;
       }

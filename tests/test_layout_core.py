@@ -31,7 +31,7 @@ def test_square_1_5mp():
 
 def test_all_results_are_multiples_of_16():
     for ratio in ASPECT_RATIOS:
-        for mp in (0.1, 0.5, 1.0, 1.5, 2.0, 4.0):
+        for mp in (0.1, 0.5, 1.0, 1.5, 2.0, 4.0, 16.0):
             w, h = compute_size(ratio, mp)
             assert w % 16 == 0 and h % 16 == 0
 

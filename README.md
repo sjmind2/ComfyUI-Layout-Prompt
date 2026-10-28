@@ -2,7 +2,7 @@
 
 A custom ComfyUI node for building MOSS-Image layout prompts interactively. It combines the output-size selector, a box editor, and the layout-prompt serializer into one node: set the summary and output shape, draw boxes over a white canvas or a reference image, and get `width`, `height`, and the layout prompt string.
 
-For the same boxes fed to `MOSSImageLayoutPrompt`, the prompt matches byte for byte. `CreateBoundingBoxes` re-quantizes boxes through its pixel canvas first (and can add palette data), so exact equality with the full chain requires boxes that survive that round-trip. The node can replace that chain (and `ResolutionSelector`) in a MOSS workflow.
+For the same boxes and size fed to `MOSSImageLayoutPrompt`, the prompt matches byte for byte. `CreateBoundingBoxes` re-quantizes boxes through its pixel canvas first (and can add palette data), so exact equality with the full chain requires boxes that survive that round-trip. The node can replace that chain (and `ResolutionSelector`) in a MOSS workflow.
 
 ## Installation
 
@@ -26,7 +26,7 @@ The canvas always represents the exact output rectangle, scaled to fit the node.
 
 ### Controls
 
-Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) only fire when the canvas or a box row has keyboard focus; clicking the canvas gives it focus. Inside caption/text inputs, keys behave as normal text editing (including the browser's native `Ctrl+Z` undo) and never edit the layout. The editor prevents the keys it handles from reaching the graph.
+Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) fire while keyboard focus is anywhere in the panel: the canvas, a box row, a toolbar button, or the panel background. Clicking the canvas or a panel gap focuses the canvas; clicking a row body focuses that row. Inside caption/text inputs, keys behave as normal text editing (including the browser's native `Ctrl+Z` undo) and never edit the layout. The editor prevents the keys it handles from reaching the graph.
 
 | Action | Control |
 |---|---|
@@ -34,12 +34,12 @@ Editing shortcuts (nudge, delete, duplicate, undo/redo, `Esc`) only fire when th
 | Move a box | Left-drag inside the box. |
 | Resize a box | Drag one of the 8 handles (four corners and four edge midpoints) on the selected box. The minimum size is 3 display px. |
 | Select | Click a box, or click a list row. Canvas and list share the selection; selecting on the canvas scrolls the row into view. |
-| Deselect | `Esc` (with canvas/row focus), or click empty canvas. |
+| Deselect | `Esc` (with panel focus), or click empty canvas. |
 | Add a box | `+ add` in the list header. Adds a centered 20% box (0-1000 bbox `[400,400,600,600]`), label `character`, and focuses its caption field. |
 | Edit a box | In its row: the label dropdown (`character`, `object`, `text`), the caption input, and a `text` input that appears only for `text` labels. Edits commit on blur or after a short typing pause. |
-| Duplicate | `Ctrl+D` (canvas/row focus), or the row's duplicate button. The copy is offset by 30 units and selected. |
+| Duplicate | `Ctrl+D` (panel focus), or the row's duplicate button. The copy keeps its size and shifts by 30 units when that fits; near the right/bottom edge it shifts 30 units the other way, and a full-frame box stays put. The copy is selected. |
 | Reorder | The row's up/down buttons. List order is JSON item order and canvas paint order: later items draw in front, except the selected box, which is always painted last. |
-| Delete | `Delete` or `Backspace` (canvas/row focus), or the row's delete button. |
+| Delete | `Delete` or `Backspace` (panel focus), or the row's delete button. |
 | Nudge | Arrow keys move the selected box 1 unit; `Shift`+arrows move it 10 units (the editor's 0-1000 coordinate space). |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` (the `Cmd` keys also work on macOS). |
 | Zoom reference | Mouse wheel over the canvas, anchored at the pointer; the `−` and `+` buttons step 10 percentage points. The `zoom %` label shows the current value. The wheel is always consumed by the editor, so the graph never zooms. |
@@ -59,7 +59,7 @@ The reference sits under the boxes and is dimmed to about 55% brightness so the 
 - **Pick file** uploads the image to ComfyUI's `input` folder under a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name (`type=input`, `overwrite=true`). Only the descriptor `{filename, type, subfolder}` is stored, so the reference survives a workflow save and a ComfyUI restart as long as the file remains. A workflow moved to another machine may not find the file.
 - **Last** uses the newest image from the most recent `executed` event (the last image when an event reports several). New executions update the button but never replace the displayed reference on their own; click `Last` to apply it. After a reload, the descriptor stored with the workflow is offered until a newer execution arrives. Last-output images often live in ComfyUI's temp folder and can be cleaned up later.
 - A small `file` or `last` badge on the toolbar names the stored reference source (the badge remains visible while `White` is selected).
-- If an upload or a `Last` load fails, the previous reference is kept and the hint line shows an error.
+- If an upload, its image decode, or a `Last` load fails, the previous reference is kept and the hint line shows an error. A successful upload or `Last` load, a mode switch, or another committed background action clears that message.
 
 ### Transform
 
@@ -89,7 +89,7 @@ The reference sits under the boxes and is dimmed to about 55% brightness so the 
 ```
 
 - The background state is stored in `node.properties.layoutPromptBg` as `{mode, source, file, last, fit, zoom, panX, panY}` and saved with the workflow. Only reference descriptors are stored; no image bytes or base64 data are written into the workflow.
-- On reload the editor restores the boxes and the reference transform. If a stored reference file is missing, the canvas falls back to white with a "reference unavailable" hint, and the stored reference is kept so the file can be restored later.
+- On reload the editor restores the boxes and the reference transform. If a stored reference file is missing, the canvas falls back to white with a "reference unavailable" hint (shown in Reference mode), and the stored descriptor and pan are kept so the file can be restored later.
 - `White`/`Reference` is view-only. Picking a file or using `Last` is an undoable source edit.
 
 ## Outputs

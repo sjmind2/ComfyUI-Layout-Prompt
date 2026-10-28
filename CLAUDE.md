@@ -14,10 +14,10 @@ Run from the repository root (this checkout is also the installed custom node):
 # Python core (system Python 3.12 with pytest): 19 tests
 python -m pytest tests/ -v
 
-# Pure frontend modules (Node 22 node:test): 22 tests
+# Pure frontend modules (Node 22 node:test): 29 tests
 npm test
 
-# Equivalent direct invocation (same 22 tests)
+# Equivalent direct invocation (same 29 tests)
 node --test "tests/js/*.test.js"
 
 # Node schema and execute behavior (ComfyUI venv, no pytest): 4 tests
@@ -45,7 +45,7 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - `web/size.js` - zero-dependency mirror of `compute_size`, including Python's round-half-to-even behavior (`pythonRound`), used by the editor for canvas sizing and the live size hint.
 - `web/list.js` - single-column box list renderer, label list/colors, selection helpers, and row-local key handling.
 - `web/styles.js` - `injectStyles()`, scoped under `.layout-prompt-editor`.
-- Tests: `tests/test_layout_core.py` (pytest, 19); `tests/js/*.test.js` (node:test, 22); `tests/node_schema_check.py` (unittest, 4, ComfyUI venv); `tests/parity_moss_check.py` (unittest, 5, real ComfyUI chain).
+- Tests: `tests/test_layout_core.py` (pytest, 19); `tests/js/*.test.js` (node:test, 29); `tests/node_schema_check.py` (unittest, 4, ComfyUI venv); `tests/parity_moss_check.py` (unittest, 5, real ComfyUI chain).
 
 ## Invariants
 
@@ -58,19 +58,19 @@ After changing Python or frontend files, restart the ComfyUI server and hard-ref
 - **History:** entries are `{layout, background}` composites, limit 50. Only committed edits push entries (pointer-up gestures, field commits, add/delete/duplicate/reorder, coalesced nudges, Fit/Fill/zoom/pan, and reference-source changes). Selection changes and `White`/`Reference` mode toggles do not.
 - **R12:** `Pick file` and `Last` are source-changing background edits, so they are undoable. A failed upload or failed `Last` load pushes nothing and keeps the previous reference.
 - **R14:** undo/redo preserve the current `White`/`Reference` mode (view-only) while restoring the snapshot's file/last/source/fit/zoom/pan.
-- **Defaults:** default node width 560 px, minimum 440 px; new box `[400,400,600,600]` with label `character`; duplicate offset 30 units; list shows about five rows before scrolling.
+- **Defaults:** default node width 560 px, minimum 440 px (also clamped on `onConfigure`); new box `[400,400,600,600]` with label `character`; duplicate translates by 30 units per axis when it fits, else 30 units the other way, else not at all, always preserving size; list shows about five rows before scrolling.
 
 ## Gotchas
 
-- **Hidden `boxes_json` widget.** The schema still declares it, and the extension only sets `widget.hidden = true`; do not remove it or its value stops serializing with the workflow. The DOM widget uses `serialize: false` and the editor writes `serializeState(state)` into `boxes_json` on every mutation. If the widget is missing, the extension warns and editor state will not persist.
+- **Hidden `boxes_json` widget.** The schema still declares it, and the extension only sets `widget.hidden = true`; do not remove it or its value stops serializing with the workflow. The DOM widget uses `serialize: false` and the editor writes `serializeState(state)` into `boxes_json` on committed edits: pointer-up gestures and discrete mutations immediately, field typing after the 150 ms debounce (blur flushes it). A queue started inside that debounce window can see the previous text. If the widget is missing, the extension warns and editor state will not persist.
 - **Global `executed` listener + `liveEditors`.** `web/layout_prompt.js` registers the listener once and keeps live editors in a `Set`. Each executed event calls `editor.setLastOutput(ref)` with the last entry of `detail.output.images`; it never switches the displayed reference. Editors unregister on `destroy()` / `onRemoved`, so removed nodes are ignored.
-- **Upload and view URLs.** Picking a file posts `FormData` (`image` with a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name, `type=input`, `overwrite=true`) to `api.fetchApi("/upload/image")`; images load through `api.apiURL("/view?filename=...&type=...&subfolder=...&t=...")` with a cache-busting `t`. Only `{filename, type, subfolder}` descriptors are persisted, never image data.
+- **Upload and view URLs.** Picking a file posts `FormData` (`image` with a unique `layout_ref_<node>_<timestamp>_<random>.<ext>` name, `type=input`, `overwrite=true`) to `api.fetchApi("/upload/image")`; images load through `api.apiURL("/view?filename=...&type=...&subfolder=...&t=...")` with a cache-busting `t`. Only `{filename, type, subfolder}` descriptors are persisted, never image data. A pick commits only after the image decodes; an upload or decode failure restores the previous snapshot and pushes no history entry. Both upload and `Last` share the `lastRequest` token so a superseded load cannot commit.
 - **Wheel consumption.** The canvas wheel listener is `passive: false` and always calls `preventDefault()` + `stopPropagation()`, so the graph never zooms. The notch is ignored during an active box/pan drag, and a wheel burst shares one undo entry (500 ms window).
 - **Pointer mapping.** Convert client coordinates with `canvas.getBoundingClientRect()` and the display-size/rect-size scale (`canvasScale()`), never raw client pixels; this keeps boxes under the cursor at any graph zoom. Pointer move/up/cancel for drags are registered on `window` so gestures survive leaving the canvas.
-- **Background persistence.** `node.properties.layoutPromptBg` holds `{mode, source, file, last, fit, zoom, panX, panY}` and is written on committed changes (debounced for pointer-driven updates). `onConfigure` restores widget values and properties before the handler runs; `syncFromWidget()` re-reads both. It refreshes the canvas size before `background.loadStored()` because `setViewport` clamps pan against the current viewport and would otherwise zero the saved pan. Restoration is a load, not an edit: it must never push history. A missing file keeps its descriptor and falls back to a white canvas.
+- **Background persistence.** `node.properties.layoutPromptBg` holds `{mode, source, file, last, fit, zoom, panX, panY}` and is written on committed changes (debounced for pointer-driven updates). `onConfigure` restores widget values and properties before the handler runs; `syncFromWidget()` re-reads both. It refreshes the canvas size before `background.loadStored()` because `setViewport` clamps pan against the current viewport and would otherwise zero the saved pan. Restoration is a load, not an edit: it must never push history. A missing/failed stored reference keeps its descriptor and restored pan and falls back to a white canvas (the error hint appears only in Reference mode); a later successful background action or mode switch clears a stale inline status.
 - **Parity check path shadowing.** This repo ships `nodes.py`, and `comfy_extras/nodes_bounding_boxes.py` does `import nodes`; running `python -m unittest` from the project root puts that root first on `sys.path`. `tests/parity_moss_check.py` temporarily removes the project root before importing ComfyUI modules and restores it afterward. Do not remove that guard.
 - **Two interpreters.** The ComfyUI venv has no pytest, and system Python has no `comfy_api`/`comfy_extras`. Keep `tests/test_layout_core.py` free of ComfyUI imports, and run `node_schema_check.py` / `parity_moss_check.py` with the venv via `unittest`. Neither venv-only check is named `test_*.py`, so system pytest does not collect them.
-- **Keyboard scope.** Editing keys only fire when the canvas or a box row has focus (`ownsKeyboardFocus()`); text/select inputs keep native editing and native undo. The window `keydown` handler runs in the capture phase and consumes handled keys so Delete, arrows, and Ctrl+Z do not reach the graph. The row renderer also stops its local keys from bubbling.
+- **Keyboard scope.** Editing keys fire when focus is on any non-editable element inside the editor root (`ownsKeyboardFocus()`): canvas, row (row-body clicks focus the row; rows are `tabIndex = -1`), row controls, toolbar, `+ add`, or panel background (background presses focus the canvas). Inputs/selects/textarea/contenteditable keep native editing and native undo. The window `keydown` handler runs in the capture phase and consumes handled keys so Delete, arrows, and Ctrl+Z do not reach the graph. After a list rebuild, focus returns to the selected row (or canvas) so the next key stays owned. The row renderer also stops its local keys from bubbling.
 - **DOM widget height.** `addDOMWidget` uses `editor.computeHeight()` for getHeight/getMinHeight/getMaxHeight; the editor grows/shrinks the node around the panel, and the extension's chained `onResize` enforces the 440 px minimum width. Do not hardcode panel heights in the extension.
 - **Pure modules.** `layout_core.py`, `web/size.js`, `web/geometry.js`, and `web/state.js` must stay DOM-free and ComfyUI-free; they are the automated-test surface.
 - **Malformed `boxes_json`.** `parse_boxes()` returns `[]` for invalid/wrong-version input, and `nodes.py` logs a warning only when the string was non-empty. The Python fallback is the plain summary; the frontend always writes valid JSON.

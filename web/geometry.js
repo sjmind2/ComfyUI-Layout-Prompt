@@ -92,6 +92,25 @@ function hitHandle(rect, px, py, radius) {
   return null;
 }
 
+/**
+ * True when a box is small enough that its handles cover the whole interior
+ * (either side no wider than the handle diameter). Such a box could otherwise
+ * never be moved: every press would become a resize.
+ */
+function isTinyRect(rect, radius) {
+  return rect.w <= radius * 2 || rect.h <= radius * 2;
+}
+
+/** True inside the central quarter of the box, where a press means "move". */
+function nearRectCenter(rect, px, py) {
+  const centerX = rect.x + rect.w / 2;
+  const centerY = rect.y + rect.h / 2;
+  return (
+    Math.abs(px - centerX) <= rect.w / 4 &&
+    Math.abs(py - centerY) <= rect.h / 4
+  );
+}
+
 function insideRect(rect, px, py) {
   return (
     px >= rect.x &&
@@ -115,9 +134,15 @@ export function hitTest(boxes, px, py, canvasW, canvasH, handleRadius = 6) {
   for (let index = boxes.length - 1; index >= 0; index -= 1) {
     const box = boxes[index];
     const rect = bboxToRect(box.bbox, canvasW, canvasH);
+    const inside = insideRect(rect, px, py);
+    // For a box no larger than the handle hit area, prefer moving when the
+    // press is near its center; presses near a corner or edge still resize.
+    if (inside && isTinyRect(rect, handleRadius) && nearRectCenter(rect, px, py)) {
+      return { id: box.id, part: "move" };
+    }
     const part = hitHandle(rect, px, py, handleRadius);
     if (part) return { id: box.id, part };
-    if (insideRect(rect, px, py)) return { id: box.id, part: "move" };
+    if (inside) return { id: box.id, part: "move" };
   }
   return null;
 }

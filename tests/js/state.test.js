@@ -24,11 +24,31 @@ test("delete selects neighbor", () => {
   assert.equal(s.boxes.length, 1);
   assert.equal(s.selectedId, "b1");
 });
-test("duplicate offsets and clamps", () => {
+test("duplicate translates the copy and keeps its size", () => {
+  let s = addBox(createState(), box("b1", [100, 100, 200, 200]));
+  s = duplicateBox(s, "b1", "b2", 30);
+  assert.deepEqual(s.boxes[1].bbox, [130, 130, 230, 230]);
+  assert.equal(s.selectedId, "b2");
+});
+test("duplicate near the bottom-right edge shifts opposite, keeping size", () => {
   let s = addBox(createState(), box("b1", [950, 950, 1000, 1000]));
   s = duplicateBox(s, "b1", "b2", 30);
-  assert.deepEqual(s.boxes[1].bbox, [980, 980, 1000, 1000]);
-  assert.equal(s.selectedId, "b2");
+  assert.deepEqual(s.boxes[1].bbox, [920, 920, 970, 970]);
+});
+test("duplicate of an edge box smaller than the offset stays full-size", () => {
+  let s = addBox(createState(), box("b1", [990, 990, 1000, 1000]));
+  s = duplicateBox(s, "b1", "b2", 30);
+  assert.deepEqual(s.boxes[1].bbox, [960, 960, 970, 970]);
+});
+test("duplicate at full frame is unchanged", () => {
+  let s = addBox(createState(), box("b1", [0, 0, 1000, 1000]));
+  s = duplicateBox(s, "b1", "b2", 30);
+  assert.deepEqual(s.boxes[1].bbox, [0, 0, 1000, 1000]);
+});
+test("duplicate translates each axis independently", () => {
+  let s = addBox(createState(), box("b1", [950, 0, 1000, 1000]));
+  s = duplicateBox(s, "b1", "b2", 30);
+  assert.deepEqual(s.boxes[1].bbox, [920, 0, 970, 1000]);
 });
 test("move order", () => {
   let s = addBox(createState(), box("b1", [0, 0, 100, 100]));

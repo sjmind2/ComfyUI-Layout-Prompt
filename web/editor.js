@@ -434,6 +434,11 @@ export class LayoutEditor {
         // Any new pointer action closes a coalesced undo group.
         this.endHistoryGroups();
         event.stopPropagation();
+        // A press on the panel background focuses the canvas, so a following
+        // Delete/arrow is owned by the editor instead of the graph node. Row
+        // bodies focus their row in list.js; controls and fields keep their
+        // own native focus.
+        this.claimPanelFocus(event.target);
       },
       { signal: this.abortController.signal },
     );
@@ -803,8 +808,8 @@ export class LayoutEditor {
 
   /**
    * Keep the "Last" button's enabled state and the source badge in sync with
-   * the background. The badge names the reference currently displayed
-   * ("file" or "last"), not merely the stored source.
+   * the background. The badge names the stored source ("file" or "last"),
+   * which stays visible in White mode rather than describing what is painted.
    * @param {import("./background.js").Background} background
    */
   updateLastControls(background) {
@@ -852,7 +857,9 @@ export class LayoutEditor {
     if (this.statusMessage) {
       message = this.statusMessage;
       isError = this.statusIsError;
-    } else if (background?.error) {
+    } else if (background?.error && background.mode === "reference") {
+      // A missing/failed stored reference is only visible on the reference
+      // layer; in White mode it must not pin an error over the live hint.
       message = background.error;
       isError = true;
     } else if (background?.loading) {
@@ -974,6 +981,10 @@ export class LayoutEditor {
   async uploadReference(file) {
     if (!file || !this.background) return;
 
+    // A new reference request supersedes any in-flight one (upload or Last):
+    // only the newest source-changing action may commit.
+    const request = (this.lastRequest += 1);
+
     this.statusMessage = "Uploading reference…";
     this.statusIsError = false;
     this.updateHint();
@@ -994,24 +1005,51 @@ export class LayoutEditor {
       }
 
       const data = await response.json();
-      // The editor may have been removed while the upload was in flight.
-      if (!this.background) return;
+      // The editor may have been removed, or another reference action may
+      // have started, while the upload was in flight.
+      if (!this.background || this.lastRequest !== request) return;
 
+      const background = this.background;
       // A pick is a background edit, not a view-only toggle. Snapshots carry
       // the file/source, so without its own entry a later undo of a layout
       // edit made before the pick would silently clear the new reference.
-      const before = this.background.toJSON();
-      this.background.setFile({
+      const before = background.toJSON();
+      const pending = background.setFile({
         filename: data?.name ?? fallbackName,
         type: data?.type ?? "input",
         subfolder: data?.subfolder ?? "",
       });
-      this.background.setMode("reference");
+      const requested = background.file;
+      // Commit only after the image actually decodes (like useLastOutput):
+      // an undecodable upload must keep the previous reference and push no
+      // history.
+      const loaded = await pending;
+
+      if (this.background !== background || this.lastRequest !== request) {
+        return;
+      }
+
+      if (!loaded) {
+        const current = background.toJSON();
+        const stillOurs =
+          current.source === "file" && sameRef(current.file, requested);
+        if (stillOurs) {
+          background.loadStored(before);
+          this.statusMessage =
+            "Reference image could not be decoded — the previous image was kept.";
+          this.statusIsError = true;
+        }
+        this.updateToolbar();
+        this.scheduleRender();
+        return;
+      }
+
+      background.setMode("reference");
       this.commitBackgroundChange(before);
       this.statusMessage = null;
       this.statusIsError = false;
     } catch (error) {
-      if (!this.background) return;
+      if (!this.background || this.lastRequest !== request) return;
       console.error(
         "[LayoutPromptBuilder] reference upload failed:",
         error,
@@ -1026,6 +1064,11 @@ export class LayoutEditor {
   }
 
   handleBackgroundChange() {
+    // A completed background action or a mode switch supersedes an earlier
+    // inline status (for example "upload failed"); the hint returns to the
+    // live state instead of showing a stale message forever.
+    this.statusMessage = null;
+    this.statusIsError = false;
     this.updateToolbar();
     this.scheduleRender();
     // Committed edits also persist immediately; this deferred write covers
@@ -1486,17 +1529,38 @@ export class LayoutEditor {
   }
 
   /**
-   * True when the canvas or a row control has keyboard focus. Toolbar buttons
-   * and the list header (+ add) are not editing surfaces; focusing them must
-   * not let Delete/arrows/Ctrl+Z edit the layout.
+   * Focus the canvas after a pointer-down on the panel background: the root,
+   * the canvas area, the hint line, or the list background. Presses on a row
+   * body focus that row (list.js); fields and buttons keep their own focus.
+   * @param {EventTarget | null} target
+   */
+  claimPanelFocus(target) {
+    if (!target || target === this.root) {
+      this.canvas?.focus?.({ preventScroll: true });
+      return;
+    }
+    if (isEditableTarget(target) || isInteractiveTarget(target)) return;
+    if (typeof target.closest === "function" && target.closest(".lp-row")) {
+      return;
+    }
+    if (this.root?.contains?.(target)) {
+      this.canvas?.focus?.({ preventScroll: true });
+    }
+  }
+
+  /**
+   * True when keyboard focus is inside this editor's panel on a non-editable
+   * element: the canvas, a row (including its controls), a toolbar button,
+   * `+ add`, or the panel background. Editing keys pressed there are consumed
+   * so Delete/arrows/Ctrl+Z can never reach the graph node or workflow.
+   * Text/select inputs and contenteditable elements keep every key, including
+   * the browser's native undo.
    */
   ownsKeyboardFocus() {
     const active = globalThis.document?.activeElement;
     if (!active) return false;
-    if (active === this.canvas) return true;
-    if (!this.listHost?.contains(active)) return false;
-    if (typeof active.closest !== "function") return false;
-    return active.closest(".lp-row") !== null;
+    if (isEditableTarget(active)) return false;
+    return Boolean(this.root && this.root.contains(active));
   }
 
   /** Stop a handled shortcut before the graph's own key handlers see it. */
@@ -1836,6 +1900,8 @@ export class LayoutEditor {
 
     const scrollTop =
       this.listHost.querySelector(".lp-list")?.scrollTop ?? 0;
+    const active = globalThis.document?.activeElement;
+    const hadListFocus = Boolean(active && this.listHost.contains(active));
     const focus = captureFieldFocus(this.listHost);
 
     renderBoxList(this.listHost, this.state, this.handlers);
@@ -1843,6 +1909,33 @@ export class LayoutEditor {
     const list = this.listHost.querySelector(".lp-list");
     if (list) list.scrollTop = scrollTop;
     restoreFieldFocus(this.listHost, focus);
+
+    // A rebuild replaces the focused row or header node; left alone, focus
+    // falls to <body> and the graph would receive the next Delete/arrow. Keep
+    // keyboard ownership in the panel by focusing the selected row (or the
+    // canvas when no box remains).
+    if (!focus && hadListFocus) {
+      if (!this.focusSelectedRow()) {
+        this.canvas?.focus?.({ preventScroll: true });
+      }
+    }
+  }
+
+  /**
+   * Focus the selected row if it exists. Used after a list rebuild so keys
+   * pressed next stay inside the editor.
+   * @returns {boolean} whether a row was focused
+   */
+  focusSelectedRow() {
+    const id = this.state.selectedId;
+    if (!id || !this.listHost) return false;
+
+    const row = [...this.listHost.querySelectorAll(".lp-row")].find(
+      (candidate) => candidate.dataset.id === id,
+    );
+    if (!row) return false;
+    row.focus?.({ preventScroll: true });
+    return true;
   }
 
   wireOutputWidgets() {

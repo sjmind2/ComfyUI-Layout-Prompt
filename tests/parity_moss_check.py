@@ -49,7 +49,7 @@ def _import_comfy_builtins():
 
 CreateBoundingBoxes, MOSSImageLayoutPrompt, ResolutionSelector = _import_comfy_builtins()
 
-MEGAPIXELS = (0.1, 1.0, 1.5, 2.0)
+MEGAPIXELS = (0.1, 1.0, 1.5, 2.0, 16.0)
 
 SUMMARY = "1girl, long hair, standing in a street"
 

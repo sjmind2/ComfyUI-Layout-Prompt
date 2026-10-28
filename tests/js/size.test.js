@@ -9,7 +9,7 @@ test("ultrawide 1 MP", () => assert.deepEqual(computeSize("21:9 (Ultrawide)", 1.
 test("square 1.5 MP", () => assert.deepEqual(computeSize("1:1 (Square)", 1.5), [1248, 1248]));
 test("all results are multiples of 16", () => {
   for (const ratio of Object.keys(ASPECT_RATIOS)) {
-    for (const mp of [0.1, 0.5, 1.0, 1.5, 2.0, 4.0]) {
+    for (const mp of [0.1, 0.5, 1.0, 1.5, 2.0, 4.0, 16.0]) {
       const [w, h] = computeSize(ratio, mp);
       assert.equal(w % 16, 0);
       assert.equal(h % 16, 0);

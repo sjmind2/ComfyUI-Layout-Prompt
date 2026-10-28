@@ -101,6 +101,9 @@ function createRow(box, index, total, selected, handlers) {
   row.className = selected ? "lp-row lp-row-selected" : "lp-row";
   row.dataset.id = box.id;
   row.setAttribute("role", "listitem");
+  // Programmatically focusable (not in the Tab order), so a row-body click
+  // can own Delete/arrow keys instead of leaving focus on <body>.
+  row.tabIndex = -1;
   row.style.setProperty("--lp-box-color", color);
   row.style.setProperty("--lp-box-color-soft", `${color}26`);
 
@@ -184,9 +187,12 @@ function createRow(box, index, total, selected, handlers) {
   );
   row.append(actions);
 
-  // Clicking the row body selects it; interacting with a control does not.
+  // Clicking the row body selects it and focuses the row, so following keys
+  // edit the box instead of reaching the graph; interacting with a control
+  // keeps the control's own focus.
   row.addEventListener("click", (event) => {
     if (event.target.closest("button, input, select, textarea")) return;
+    row.focus?.({ preventScroll: true });
     handlers.onSelect?.(box.id);
   });
 

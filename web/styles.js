@@ -7,7 +7,6 @@ const STYLE_ID = "layout-prompt-styles";
 
 const STYLES = `
 .layout-prompt-editor {
-  --lp-background: #141418;
   --lp-panel: #1c1c22;
   --lp-border: #34343d;
   --lp-text: #e2e2e8;

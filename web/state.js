@@ -9,6 +9,7 @@ import { normalizeBbox } from "./geometry.js";
 const STATE_VERSION = 1;
 const DEFAULT_LABEL = "character";
 const DUPLICATE_OFFSET = 30;
+const BBOX_MAX = 1000;
 
 /**
  * @param {string} id
@@ -56,14 +57,32 @@ export function deleteBox(state, id) {
   return { ...state, boxes, selectedId };
 }
 
+/**
+ * Translate one axis pair by `offset` without changing its size: shift up
+ * first, then down when shifting up would leave the frame, and leave the pair
+ * alone when neither direction fits (a full-frame box).
+ * @param {number} low
+ * @param {number} high
+ * @param {number} offset
+ * @returns {[number, number]}
+ */
+function translateAxis(low, high, offset) {
+  if (high + offset <= BBOX_MAX) return [low + offset, high + offset];
+  if (low - offset >= 0) return [low - offset, high - offset];
+  return [low, high];
+}
+
 export function duplicateBox(state, id, newId, offset = DUPLICATE_OFFSET) {
   const source = state.boxes.find((box) => box.id === id);
   if (!source) return { ...state, boxes: [...state.boxes] };
 
+  const [y0, x0, y1, x1] = normalizeBbox(source.bbox);
+  const [nextY0, nextY1] = translateAxis(y0, y1, offset);
+  const [nextX0, nextX1] = translateAxis(x0, x1, offset);
   const copy = {
     ...source,
     id: newId,
-    bbox: normalizeBbox(source.bbox.map((value) => value + offset)),
+    bbox: normalizeBbox([nextY0, nextX0, nextY1, nextX1]),
   };
   return { ...state, boxes: [...state.boxes, copy], selectedId: newId };
 }

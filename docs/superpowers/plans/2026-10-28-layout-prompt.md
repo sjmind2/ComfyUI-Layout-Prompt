@@ -360,10 +360,11 @@ test("delete selects neighbor", () => {
   assert.equal(s.boxes.length, 1);
   assert.equal(s.selectedId, "b1");
 });
-test("duplicate offsets and clamps", () => {
+test("duplicate translates the copy and keeps its size", () => {
   let s = addBox(createState(), box("b1", [950, 950, 1000, 1000]));
   s = duplicateBox(s, "b1", "b2", 30);
-  assert.deepEqual(s.boxes[1].bbox, [980, 980, 1000, 1000]);
+  // The copy shifts opposite near the edge; the 50-unit box stays 50 units.
+  assert.deepEqual(s.boxes[1].bbox, [920, 920, 970, 970]);
   assert.equal(s.selectedId, "b2");
 });
 test("move order", () => {

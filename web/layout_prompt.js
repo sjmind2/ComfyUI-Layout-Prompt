@@ -124,6 +124,20 @@ app.registerExtension({
       // onConfigure runs; syncFromWidget re-reads both. Restoring the
       // background is a load, not an edit.
       this.layoutEditor?.syncFromWidget();
+      // A hand-edited or older workflow must not restore narrower than the
+      // panel minimum; the toolbar would clip. Clamp after the editor has
+      // re-read the restored state.
+      if (
+        Array.isArray(this.size) &&
+        Number.isFinite(this.size[0]) &&
+        this.size[0] < MIN_WIDTH
+      ) {
+        if (typeof this.setSize === "function") {
+          this.setSize([MIN_WIDTH, this.size[1]]);
+        } else {
+          this.size[0] = MIN_WIDTH;
+        }
+      }
     });
 
     chainCallback(nodeType.prototype, "onResize", function (size) {
